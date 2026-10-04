@@ -1,0 +1,35 @@
+services:
+  mysql:
+    image: public.ecr.aws/docker/library/mysql:8.4
+    environment:
+      MYSQL_DATABASE: pr_review_agent
+      MYSQL_USER: pr_agent
+      MYSQL_PASSWORD: ${PR_REVIEW_DB_PASSWORD:-pr_agent_dev}
+      MYSQL_ROOT_PASSWORD: ${PR_REVIEW_DB_ROOT_PASSWORD:-root_dev}
+    ports:
+      - "127.0.0.1:${PR_REVIEW_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./src/main/resources/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${PR_REVIEW_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql_data:
+  redis_data:

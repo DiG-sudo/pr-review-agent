@@ -1,0 +1,33 @@
+server:
+  address: 127.0.0.1
+  port: ${PR_REVIEW_SERVER_PORT:18080}
+
+spring:
+  ai:
+    openai:
+      # 仅用于在尚未接入 Agent 时启动应用；真正调用模型时必须设置环境变量。
+      api-key: ${SPRING_AI_OPENAI_API_KEY:local-webhook-placeholder}
+  datasource:
+    url: ${PR_REVIEW_DB_URL:jdbc:mysql://127.0.0.1:3306/pr_review_agent}
+    username: ${PR_REVIEW_DB_USERNAME:pr_agent}
+    password: ${PR_REVIEW_DB_PASSWORD:pr_agent_dev}
+  sql:
+    init:
+      mode: always
+  data:
+    redis:
+      host: ${PR_REVIEW_REDIS_HOST:127.0.0.1}
+      port: ${PR_REVIEW_REDIS_PORT:6379}
+
+pr-review:
+  execution:
+    workers: ${PR_REVIEW_WORKERS:8}
+    queue-capacity: ${PR_REVIEW_QUEUE_CAPACITY:64}
+  events:
+    publish-delay-ms: ${PR_REVIEW_PUBLISH_DELAY_MS:500}
+    poll-delay-ms: ${PR_REVIEW_POLL_DELAY_MS:500}
+  evaluation:
+    # Development data stays outside this repository. Override these paths in
+    # another machine with the corresponding environment variables.
+    benchmark-workspace: ${PR_REVIEW_BENCHMARK_WORKSPACE:/Users/guodi/Desktop/java/Project01/pr-review-agent/benchmark-workspace}
+    golden-comments: ${PR_REVIEW_GOLDEN_COMMENTS:/Users/guodi/Desktop/java/Project01/pr-review-agent/golden_comments}
