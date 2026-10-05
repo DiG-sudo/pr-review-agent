@@ -7,7 +7,7 @@ import java.util.Objects;
 
 import org.springframework.ai.chat.model.ToolContext;
 
-import com.guodi.pragent.reviewer.state.ReviewState;
+import com.guodi.pragent.reviewer.ReviewState;
 
 /** Per-review data passed to otherwise stateless reviewer tools. */
 public record ReviewToolContext(Path fixtureRoot, ReviewState reviewState) {

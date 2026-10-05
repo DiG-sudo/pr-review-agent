@@ -47,12 +47,12 @@ public final class ReviewReadTools {
             @ToolParam(required = false, description = "Number of source lines to return, maximum 500")
                     Integer lineCount,
             ToolContext toolContext) {
-        Path sourceRoot = sourceRoot(toolContext);
-        Path file = resolveSourcePath(sourceRoot, path);
+        Path sourceDirectory = sourceDirectory(toolContext);
+        Path file = resolveSourcePath(sourceDirectory, path);
         if (!Files.isRegularFile(file)) {
             throw new IllegalArgumentException("source file does not exist: " + path);
         }
-        return page(file, startLine, lineCount, sourceRoot.relativize(file).toString());
+        return page(file, startLine, lineCount, sourceDirectory.relativize(file).toString());
     }
 
     @Tool(name = "search_code", description = "Search source files in the local PR workspace without using a shell.")
@@ -64,8 +64,8 @@ public final class ReviewReadTools {
                     Integer maxResults,
             ToolContext toolContext) {
         String needle = requireText(query, "query");
-        Path sourceRoot = sourceRoot(toolContext);
-        Path base = path == null || path.isBlank() ? sourceRoot : resolveSourcePath(sourceRoot, path);
+        Path sourceDirectory = sourceDirectory(toolContext);
+        Path base = path == null || path.isBlank() ? sourceDirectory : resolveSourcePath(sourceDirectory, path);
         int limit = positiveLimit(maxResults, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS, "maxResults");
         StringBuilder output = new StringBuilder();
         int matches = 0;
@@ -80,7 +80,7 @@ public final class ReviewReadTools {
                     while ((line = reader.readLine()) != null && matches < limit) {
                         lineNumber++;
                         if (line.contains(needle)) {
-                            output.append(sourceRoot.relativize(file))
+                            output.append(sourceDirectory.relativize(file))
                                     .append(":")
                                     .append(lineNumber)
                                     .append(": ")
@@ -135,16 +135,16 @@ public final class ReviewReadTools {
         }
     }
 
-    private static Path sourceRoot(ToolContext toolContext) {
+    private static Path sourceDirectory(ToolContext toolContext) {
         Path fixtureRoot = ReviewToolContext.from(toolContext).fixtureRoot();
         return requireDirectory(fixtureRoot.resolve("source"), "fixture source");
     }
 
-    private static Path resolveSourcePath(Path sourceRoot, String relativePath) {
+    private static Path resolveSourcePath(Path sourceDirectory, String relativePath) {
         String value = requireText(relativePath, "path");
         try {
-            Path resolved = sourceRoot.resolve(value).normalize().toRealPath();
-            if (!resolved.startsWith(sourceRoot)) {
+            Path resolved = sourceDirectory.resolve(value).normalize().toRealPath();
+            if (!resolved.startsWith(sourceDirectory)) {
                 throw new IllegalArgumentException("path escapes fixture source: " + relativePath);
             }
             return resolved;
