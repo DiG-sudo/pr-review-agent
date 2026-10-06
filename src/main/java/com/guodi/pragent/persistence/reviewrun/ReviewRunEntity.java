@@ -23,6 +23,7 @@ public class ReviewRunEntity {
 
     private Integer pullRequestNumber;
 
+    /** PENDING、RUNNING、PUBLICATION_READY、PUBLISHED、FAILED。 */
     private String status;
 
     private String initialMessagesJson;

@@ -28,12 +28,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.guodi.pragent.harness.ReviewHarness;
 import com.guodi.pragent.persistence.outbox.OutboxEventEntity;
 import com.guodi.pragent.persistence.outbox.OutboxEventMapper;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.reviewer.ReviewRequest;
-import com.guodi.pragent.reviewer.ReviewerAgent;
+import com.guodi.pragent.runtime.ReviewRunResult;
+import com.guodi.pragent.runtime.ReviewStatus;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "GITHUB_WEBHOOK_SECRET=chain-test-secret",
@@ -42,16 +44,16 @@ import com.guodi.pragent.reviewer.ReviewerAgent;
         "spring.datasource.password=${PR_REVIEW_DB_ROOT_PASSWORD:root_dev}",
         "spring.data.redis.database=15"
 })
-@Import(WebhookToReviewerAgentIT.TestAgentConfig.class)
-class WebhookToReviewerAgentIT {
+@Import(WebhookToReviewHarnessIT.TestHarnessConfig.class)
+class WebhookToReviewHarnessIT {
 
     @Autowired private TestRestTemplate http;
-    @Autowired private ProbeAgent agent;
+    @Autowired private ProbeHarness harnessProbe;
     @Autowired private ReviewRunMapper reviews;
     @Autowired private OutboxEventMapper outbox;
 
     @Test
-    void signedWebhookReachesReviewerAgentThroughOutboxAndStream() throws Exception {
+    void signedWebhookReachesReviewHarnessThroughOutboxAndStream() throws Exception {
         int prNumber = 800_000_000 + (int) (System.nanoTime() % 100_000_000);
         String headSha = UUID.randomUUID().toString().replace("-", "") + "00000000";
         String baseSha = "b".repeat(40);
@@ -69,13 +71,13 @@ class WebhookToReviewerAgentIT {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(response.getBody()).isEqualTo("created");
-        assertThat(agent.called.await(15, TimeUnit.SECONDS)).isTrue();
-        assertThat(agent.request).isEqualTo(new ReviewRequest(
+        assertThat(harnessProbe.called.await(15, TimeUnit.SECONDS)).isTrue();
+        assertThat(harnessProbe.request).isEqualTo(new ReviewRequest(
                 "github:chain-test/repo#" + prNumber, "chain-test/repo", prNumber,
                 headSha, baseSha, null));
 
         ReviewRunEntity run = reviews.selectOne(Wrappers.<ReviewRunEntity>lambdaQuery()
-                .eq(ReviewRunEntity::getThreadId, agent.request.threadId())
+                .eq(ReviewRunEntity::getThreadId, harnessProbe.request.threadId())
                 .eq(ReviewRunEntity::getHeadSha, headSha));
         assertThat(run.getStatus()).isEqualTo("FAILED");
         OutboxEventEntity event = outbox.selectOne(Wrappers.<OutboxEventEntity>lambdaQuery()
@@ -90,42 +92,43 @@ class WebhookToReviewerAgentIT {
     }
 
     @TestConfiguration
-    static class TestAgentConfig {
+    static class TestHarnessConfig {
         @Bean
-        ProbeAgent probeAgent(ReviewRunMapper reviews) {
-            return new ProbeAgent(reviews);
+        ProbeHarness probeHarness(ReviewRunMapper reviews) {
+            return new ProbeHarness(reviews);
         }
 
         @Bean
         @Primary
-        ReviewerAgent testReviewerAgent(ProbeAgent probe) {
-            ReviewerAgent agent = mock(ReviewerAgent.class);
+        ReviewHarness testReviewHarness(ProbeHarness probe) {
+            ReviewHarness harness = mock(ReviewHarness.class);
             doAnswer(call -> {
-                probe.call(call.getArgument(0), call.getArgument(1));
-                return null;
-            }).when(agent).call(anyLong(), any());
-            return agent;
+                probe.run(call.getArgument(0));
+                return new ReviewRunResult(ReviewStatus.FAILED, null);
+            }).when(harness).aroundRun(anyLong(), any());
+            return harness;
         }
     }
 
-    static final class ProbeAgent {
+    static final class ProbeHarness {
         private final ReviewRunMapper reviews;
         final CountDownLatch called = new CountDownLatch(1);
         volatile ReviewRequest request;
 
-        ProbeAgent(ReviewRunMapper reviews) {
+        ProbeHarness(ReviewRunMapper reviews) {
             this.reviews = reviews;
         }
 
-        public void call(long taskId, ReviewRequest request) {
-            this.request = request;
+        public void run(long taskId) {
+            ReviewRunEntity task = reviews.selectById(taskId);
+            this.request = new ReviewRequest(task.getThreadId(), task.getRepository(), task.getPullRequestNumber(), task.getHeadSha(), task.getBaseSha(), null);
             ReviewRunEntity update = new ReviewRunEntity();
             update.setStatus("FAILED");
             int changed = reviews.update(update, Wrappers.<ReviewRunEntity>lambdaUpdate()
                     .eq(ReviewRunEntity::getId, taskId)
                     .eq(ReviewRunEntity::getStatus, "RUNNING"));
             if (changed != 1) {
-                throw new IllegalStateException("test Agent did not receive a RUNNING task");
+                throw new IllegalStateException("test Harness did not receive a RUNNING task");
             }
             called.countDown();
         }

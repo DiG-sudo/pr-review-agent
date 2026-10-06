@@ -1,10 +1,5 @@
 package com.guodi.pragent.reviewer;
 
-public  record ReviewRequest(
-    String threadId,
-    String repository,      // owner/repo
-    int pullRequestNumber,
-    String headSha,
-    String baseSha,
-    String fixtureId        // 当前本地阶段用于定位 fixture
-) {}
+// repository: owner/repo
+// fixtureId: 当前本地阶段用于定位 fixture
+public record ReviewRequest(String threadId, String repository, int pullRequestNumber, String headSha, String baseSha, String fixtureId) {}

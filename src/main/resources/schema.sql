@@ -5,13 +5,14 @@ CREATE TABLE IF NOT EXISTS review_run (
     base_sha CHAR(40) NULL,
     repository VARCHAR(255) NOT NULL,
     pull_request_number INT NOT NULL,
-    status VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL COMMENT 'PENDING/RUNNING/PUBLICATION_READY/PUBLISHED/FAILED',
     initial_messages_json JSON NULL,
     review_state_json JSON NULL,
     final_result_json JSON NULL,
     publication_key VARCHAR(128) NULL,
     external_review_id VARCHAR(128) NULL,
-    UNIQUE KEY uq_review_run_thread_revision (thread_id, head_sha)
+    UNIQUE KEY uq_review_run_thread_revision (thread_id, head_sha),
+    CONSTRAINT chk_review_run_status CHECK (status IN ('PENDING', 'RUNNING', 'PUBLICATION_READY', 'PUBLISHED', 'FAILED'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS outbox_event (

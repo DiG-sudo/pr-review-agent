@@ -39,9 +39,7 @@ public final class GitHubWorkspacePreparer {
     private final String gitBase;
 
     @Autowired
-    public GitHubWorkspacePreparer(RestClient.Builder restClient,
-            @Value("${GITHUB_TOKEN:}") String githubToken,
-            @Value("${PR_REVIEW_WORKSPACE_ROOT:${java.io.tmpdir}}") String workspaceRoot) {
+    public GitHubWorkspacePreparer(RestClient.Builder restClient, @Value("${GITHUB_TOKEN:}") String githubToken, @Value("${PR_REVIEW_WORKSPACE_ROOT:${java.io.tmpdir}}") String workspaceRoot) {
         this(restClient.baseUrl("https://api.github.com").build(), githubToken,
                 Path.of(workspaceRoot), "https://github.com/");
     }

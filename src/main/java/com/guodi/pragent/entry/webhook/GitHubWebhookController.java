@@ -27,17 +27,14 @@ public final class GitHubWebhookController {
     private final GitHubWebhookService webhookService;
     private final GitHubWebhookParser webhookParser;
 
-    public GitHubWebhookController(ObjectMapper json, @Value("${GITHUB_WEBHOOK_SECRET:}") String secret,
-            GitHubWebhookService webhookService) {
+    public GitHubWebhookController(ObjectMapper json, @Value("${GITHUB_WEBHOOK_SECRET:}") String secret, GitHubWebhookService webhookService) {
         this.webhookService = webhookService;
         this.webhookParser = secret == null || secret.isBlank()
                 ? null : new GitHubWebhookParser(json, secret);
     }
 
     @PostMapping("/github/webhook")
-    public ResponseEntity<String> receive(@RequestBody byte[] body,
-            @RequestHeader(value = "X-GitHub-Event", required = false) String event,
-            @RequestHeader(value = "X-Hub-Signature-256", required = false) String signature) {
+    public ResponseEntity<String> receive(@RequestBody byte[] body, @RequestHeader(value = "X-GitHub-Event", required = false) String event, @RequestHeader(value = "X-Hub-Signature-256", required = false) String signature) {
         if (webhookParser == null) {
             log.error("GitHub webhook rejected: GITHUB_WEBHOOK_SECRET is not configured");
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)

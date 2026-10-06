@@ -33,8 +33,7 @@ public final class GitHubReviewLookup {
     record Response(int statusCode, String body) {}
 
     @Autowired
-    public GitHubReviewLookup(ObjectMapper objectMapper,
-            @Value("${GITHUB_TOKEN:}") String token) {
+    public GitHubReviewLookup(ObjectMapper objectMapper, @Value("${GITHUB_TOKEN:}") String token) {
         this(httpSender(), objectMapper, URI.create("https://api.github.com"), token);
     }
 
@@ -46,9 +45,7 @@ public final class GitHubReviewLookup {
     }
 
     /** Empty means every page was read successfully and no matching review exists. */
-    public OptionalLong findPublished(
-            String repository, int pullRequestNumber, String headSha, String publicationKey)
-            throws IOException {
+    public OptionalLong findPublished(String repository, int pullRequestNumber, String headSha, String publicationKey) throws IOException {
         if (repository == null || !repository.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")) {
             throw new IllegalArgumentException("repository must be owner/name");
         }

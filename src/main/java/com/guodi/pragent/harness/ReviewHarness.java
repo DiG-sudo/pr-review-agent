@@ -1,52 +1,95 @@
 package com.guodi.pragent.harness;
 
 import java.util.List;
+import java.util.function.Function;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
-import com.guodi.pragent.runtime.ReviewRunRequest;
+
+import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
+import com.guodi.pragent.runtime.ReviewExecution;
 import com.guodi.pragent.runtime.ReviewRunResult;
+import com.guodi.pragent.runtime.ReviewStatus;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.tool.ToolRegistry;
 
-/**
- * Lifecycle insertion points around {@code ReviewReActRuntime}.
- *
- * <p>This stays as one collaborator rather than becoming a generic middleware chain. The default
- * methods are intentionally no-op so the ReAct skeleton can be completed before each Harness
- * responsibility is implemented.
- */
-public interface ReviewHarness {
+/** 任务生命周期、推理准备、模型调用和工具轮的插入点。 */
+@Component
+public class ReviewHarness {
 
-    /** H1: restore state, start tracing and prepare the workspace. */
-    default void beforeRun(ReviewRunRequest request) {}
+    private final ReviewRunMapper reviewRunMapper;
+    private final ToolRoundCoordinator toolRounds;
+    private final ReviewContextBuilder reviewContextBuilder;
+    @Autowired 
+    private final ToolRegistry toolRegister;
+    public ReviewHarness(ReviewRunMapper reviewRunMapper, ToolRoundCoordinator toolRounds,ReviewContextBuilder reviewContextBuilder) {
+        this.reviewRunMapper = reviewRunMapper;
+        this.toolRounds = toolRounds;
+        this.reviewContextBuilder = reviewContextBuilder;
+    }
 
-    /** H2: enforce budgets and prepare the messages and visible tools for this reasoning step. */
-    default void beforeReasoning(
-            ReviewRunRequest request, int step, List<Message> messages, ToolCallback[] tools) {}
+    /** next 是 Runtime.runLoop；正常返回必须表示已有终态或后续调度已可靠落库。 */
+    public ReviewRunResult aroundRun(Long taskId, Function<ReviewExecution, ReviewRunResult> next) {
 
-    /** H3: record the start of one model call. */
-    default void beforeModelCall(ReviewRunRequest request, int step) {}
 
-    /** H4: persist the model response, usage and timing information. */
-    default void afterModelCall(ReviewRunRequest request, int step, ChatResponse response) {}
+        // TODO: 根据持久化初始化记录准备新任务或恢复任务，构造 ReviewExecution。
+        // TODO: next.apply(execution) 执行循环；READY 接管发布，失败按策略落库。
+        // TODO: 可重试审查失败与 Outbox 调度同事务提交，才能返回 PENDING。
+        // TODO: finally 清理工作区；无法可靠安排后续执行时向消费者抛异常。
+        throw new UnsupportedOperationException("审查任务生命周期尚未实现");
+    }
 
-    /** H5: validate permissions and persist tool-call intent before side effects begin. */
-    default void beforeActing(
-            ReviewRunRequest request, int step, AssistantMessage assistantMessage) {}
+    /** next 是 modelHandler；RUNNING 结果携带模型响应，其他结果停止循环。 */
+    public ReviewRunResult aroundReasoning(ReviewExecution execution, Function<Prompt, ChatResponse> next) {
+        ReviewRunEntity task = reviewRunMapper.selectById(execution.getRunId());
+        if (task == null) {
+            throw new IllegalStateException("审查任务不存在: " + execution.getRunId());
+        }
+        ReviewStatus status = ReviewStatus.valueOf(task.getStatus());
+        switch (status) {
+            case PUBLICATION_READY, PUBLISHED, FAILED:
+                return new ReviewRunResult(status, null);
+            case RUNNING:
+                break;
+            default:
+                throw new IllegalStateException("任务状态不允许推理: " + status);
+        }
+        if(execution.getModelCalls()+1>execution.getMaxModelCalls()){
+            return new ReviewRunResult(ReviewStatus.FAILED, null);
+        }
+        List<Message> modelMessages = reviewContextBuilder.buildModelMessages(execution);
+        ToolCallingChatOptions options = ToolCallingChatOptions
+                                        .builder()
+                                        .toolCallbacks(toolRegister.getCallbacks())
+                                        .internalToolExecutionEnabled(false)
+                                        .build();
+        Prompt prompt = new Prompt(modelMessages,options);
+        execution.setModelCalls(execution.getModelCalls() + 1);
 
-    /** H6: persist tool results and any resulting Finding state changes. */
-    default void afterActing(
-            ReviewRunRequest request, int step, List<ToolOutcome> outcomes) {}
+        ChatResponse ChatResponse = next.apply(prompt);
+        //after 预留可能的逻辑
+        return new ReviewRunResult(ReviewStatus.RUNNING, ChatResponse);
+    }
 
-    /** H7: persist the successful or controlled terminal state. */
-    default void afterRun(ReviewRunRequest request, ReviewRunResult result) {}
+    /** next 是实际的 chatModel.call，保持 Spring AI 的输入输出协议。 */
+    public ChatResponse aroundModelCall(Prompt prompt, Function<Prompt, ChatResponse> next) {
+        //before 预留逻辑
+        ChatResponse response = next.apply(prompt);
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            throw new IllegalStateException("模型没有返回有效响应");
+        }
+        // TODO: after 模型请求的超时、重试和调用记录策略。
+        return response;
+    }
 
-    /** H8: persist the failure state. Resource cleanup belongs in {@link #afterFinally}. */
-    default void onFailure(ReviewRunRequest request, RuntimeException error) {}
-
-    /** H9: always release workspace and trace resources. */
-    default void afterFinally(ReviewRunRequest request) {}
+    public List<ToolOutcome> aroundToolRound(ReviewExecution execution, AssistantMessage assistantMessage,ToolRoundCoordinator toolRounds) {
+        
+    }
 }

@@ -42,7 +42,7 @@ public final class ReviewInitialMessagesBuilder {
             - `add_finding`: record a new structured finding.
             - `update_finding`: correct, resolve, or otherwise update an existing finding.
             - `list_findings`: inspect the currently recorded findings.
-            - `publish_review`: publish the final review and end the review run.
+            - `publish_review`: prepare the final review; the Harness handles remote publication.
             
             Use only the supplied tools. Do not assume that another tool or shell command is
             available.
@@ -55,8 +55,8 @@ public final class ReviewInitialMessagesBuilder {
             3. For every confirmed issue, call `add_finding`.
             4. Before publishing, call `list_findings` when necessary to verify the current
                Finding state. Use `update_finding` instead of creating a duplicate Finding.
-            5. After the review is complete, call `publish_review` exactly once.
-            6. `publish_review` is terminal. Do not request more tools after it succeeds.
+            5. After inspecting all tool results, request `publish_review` alone in its own round.
+            6. After publication content is committed, the Harness ends the loop and publishes it.
             
             ## Finding requirements
             

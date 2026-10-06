@@ -16,8 +16,7 @@ import com.guodi.pragent.runtime.tool.ToolRegistry;
 public class ReviewToolConfig {
 
     @Bean
-    public ToolRegistry toolRegistry(ReviewReadTools reads, FindingWriteTools findings,
-            ReviewTerminalTools terminal) {
+    public ToolRegistry toolRegistry(ReviewReadTools reads, FindingWriteTools findings, ReviewTerminalTools terminal) {
         List<ToolBinding> bindings = new ArrayList<>();
         addToolBindings(bindings, Kind.WRITE, findings);
         addToolBindings(bindings, Kind.READ, reads);

@@ -23,12 +23,7 @@ public final class ReviewReadTools {
     private static final int MAX_SEARCH_RESULTS = 200;
 
     @Tool(name = "get_diff", description = "Read a page of the current local PR diff and its metadata.")
-    public String getDiff(
-            @ToolParam(required = false, description = "First diff line to return, starting at 1")
-                    Integer startLine,
-            @ToolParam(required = false, description = "Number of diff lines to return, maximum 500")
-                    Integer lineCount,
-            ToolContext toolContext) {
+    public String getDiff(@ToolParam(required = false, description = "First diff line to return, starting at 1") Integer startLine, @ToolParam(required = false, description = "Number of diff lines to return, maximum 500") Integer lineCount, ToolContext toolContext) {
         Path fixtureRoot = ReviewToolContext.from(toolContext).fixtureRoot();
         Path metadataPath = requireFile(fixtureRoot.resolve("metadata.json"), "metadata.json");
         Path diffPath = requireFile(fixtureRoot.resolve("diff.patch"), "diff.patch");
@@ -39,14 +34,7 @@ public final class ReviewReadTools {
     }
 
     @Tool(name = "read_file", description = "Read a page of a source file from the local PR workspace.")
-    public String readFile(
-            @ToolParam(description = "Repository-relative path under the fixture source directory")
-                    String path,
-            @ToolParam(required = false, description = "First source line to return, starting at 1")
-                    Integer startLine,
-            @ToolParam(required = false, description = "Number of source lines to return, maximum 500")
-                    Integer lineCount,
-            ToolContext toolContext) {
+    public String readFile(@ToolParam(description = "Repository-relative path under the fixture source directory") String path, @ToolParam(required = false, description = "First source line to return, starting at 1") Integer startLine, @ToolParam(required = false, description = "Number of source lines to return, maximum 500") Integer lineCount, ToolContext toolContext) {
         Path sourceDirectory = sourceDirectory(toolContext);
         Path file = resolveSourcePath(sourceDirectory, path);
         if (!Files.isRegularFile(file)) {
@@ -56,13 +44,7 @@ public final class ReviewReadTools {
     }
 
     @Tool(name = "search_code", description = "Search source files in the local PR workspace without using a shell.")
-    public String searchCode(
-            @ToolParam(description = "Case-sensitive text to find") String query,
-            @ToolParam(required = false, description = "Optional repository-relative file or directory")
-                    String path,
-            @ToolParam(required = false, description = "Maximum matches to return, maximum 200")
-                    Integer maxResults,
-            ToolContext toolContext) {
+    public String searchCode(@ToolParam(description = "Case-sensitive text to find") String query, @ToolParam(required = false, description = "Optional repository-relative file or directory") String path, @ToolParam(required = false, description = "Maximum matches to return, maximum 200") Integer maxResults, ToolContext toolContext) {
         String needle = requireText(query, "query");
         Path sourceDirectory = sourceDirectory(toolContext);
         Path base = path == null || path.isBlank() ? sourceDirectory : resolveSourcePath(sourceDirectory, path);

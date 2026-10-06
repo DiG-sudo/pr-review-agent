@@ -9,7 +9,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -23,12 +22,13 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.guodi.pragent.runtime.ReviewReActRuntime;
+import com.guodi.pragent.runtime.ReviewRunResult;
+import com.guodi.pragent.runtime.ReviewStatus;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
-import com.guodi.pragent.reviewer.ReviewRequest;
-import com.guodi.pragent.reviewer.ReviewerAgent;
 
-/** Single-process Stream consumer; acknowledgements follow durable terminal state. */
+/** 认领任务后调用 Runtime；终态或可靠安排后续执行后确认消息。 */
 @Component
 public final class ReviewStreamConsumer {
 
@@ -37,26 +37,23 @@ public final class ReviewStreamConsumer {
 
     private final StringRedisTemplate redis;
     private final ReviewRunMapper reviews;
-    private final ObjectProvider<ReviewerAgent> agents;
+    private final ReviewReActRuntime runtime;
     private final ThreadPoolExecutor reviewWorkerExecutor;
 
     private boolean groupReady;
 
-    public ReviewStreamConsumer(StringRedisTemplate redis, ReviewRunMapper reviews,
-            ObjectProvider<ReviewerAgent> agents,
-            @Qualifier("reviewWorkerExecutor") ThreadPoolExecutor reviewWorkerExecutor) {
+    public ReviewStreamConsumer(StringRedisTemplate redis, ReviewRunMapper reviews, ReviewReActRuntime runtime, @Qualifier("reviewWorkerExecutor") ThreadPoolExecutor reviewWorkerExecutor) {
         this.redis = redis;
         this.reviews = reviews;
-        this.agents = agents;
+        this.runtime = runtime;
         this.reviewWorkerExecutor = reviewWorkerExecutor;
     }
 
     @Scheduled(fixedDelayString = "${pr-review.events.poll-delay-ms:500}")
     public void consumeNewMessages() {
         ensureConsumerGroup();
-        ReviewerAgent agent = agents.getIfAvailable();
         int freeQueueSlots = reviewWorkerExecutor.getQueue().remainingCapacity();
-        if (agent == null || freeQueueSlots == 0) {
+        if (freeQueueSlots == 0) {
             return;
         }
 
@@ -70,7 +67,7 @@ public final class ReviewStreamConsumer {
             return;
         }
         for (MapRecord<String, String, String> record : records) {
-            reviewWorkerExecutor.execute(() -> processMessage(record, agent));
+            reviewWorkerExecutor.execute(() -> processMessage(record));
         }
     }
 
@@ -91,21 +88,26 @@ public final class ReviewStreamConsumer {
         log.info("Review Stream group ready: stream={}, group={}", STREAM_KEY, GROUP);
     }
 
-    private void processMessage(MapRecord<String, String, String> record, ReviewerAgent agent) {
+    private void processMessage(MapRecord<String, String, String> record) {
         try {
             long taskId = Long.parseLong(record.getValue().get("run_id"));
 
             //两个分支,解决重复投递,乐观锁解决并发任务处理
             ReviewRunEntity task = reviews.selectById(taskId);
-            if (task == null || !"PENDING".equals(task.getStatus())) {
+            if (task != null && ReviewStatus.PUBLICATION_READY.name().equals(task.getStatus())) {
+                // TODO: 发布重试需要独立认领策略，接入统一恢复入口；当前保留 PEL，不能当重复消息 ACK。
+                log.warn("Publication-ready task awaits recovery dispatch: taskId={}", taskId);
+                return;
+            }
+            if (task == null || !ReviewStatus.PENDING.name().equals(task.getStatus())) {
                 redis.opsForStream().acknowledge(STREAM_KEY, GROUP, record.getId());
                 return;
             }
             ReviewRunEntity update = new ReviewRunEntity();
-            update.setStatus("RUNNING");
+            update.setStatus(ReviewStatus.RUNNING.name());
             int claimed = reviews.update(update, Wrappers.<ReviewRunEntity>lambdaUpdate()
                     .eq(ReviewRunEntity::getId, taskId)
-                    .eq(ReviewRunEntity::getStatus, "PENDING"));
+                    .eq(ReviewRunEntity::getStatus, ReviewStatus.PENDING.name()));
             if (claimed != 1) {
                 redis.opsForStream().acknowledge(STREAM_KEY, GROUP, record.getId());
                 return;
@@ -113,21 +115,13 @@ public final class ReviewStreamConsumer {
 
             log.info("Review task starting: taskId={}, threadId={}, headSha={}",
                     taskId, task.getThreadId(), task.getHeadSha());
-            //进入agent
-            //TODO 同一prid,注意latestRun
-            agent.call(taskId, new ReviewRequest(task.getThreadId(), task.getRepository(),
-                    task.getPullRequestNumber(), task.getHeadSha(), task.getBaseSha(), null));
-            //TODO 依据agent执行结果判断是否应该ack
-            ReviewRunEntity finished = reviews.selectById(taskId);
-            if (finished != null && ("PUBLISHED".equals(finished.getStatus())
-                    || "FAILED".equals(finished.getStatus())
-                    || "SUPERSEDED".equals(finished.getStatus()))) {
-                redis.opsForStream().acknowledge(STREAM_KEY, GROUP, record.getId());
-                log.info("Review task acknowledged: taskId={}, status={}",
-                        taskId, finished.getStatus());
-            } else {
-                log.warn("Review task returned without durable terminal state: taskId={}", taskId);
+            // 正常返回代表终态，或后续调度已经可靠落库；未处理异常留在 PEL。
+            ReviewRunResult result = runtime.run(taskId);
+            if (result == null || result.status() == ReviewStatus.RUNNING) {
+                throw new IllegalStateException("Agent 未结束本次执行: " + taskId);
             }
+            redis.opsForStream().acknowledge(STREAM_KEY, GROUP, record.getId());
+            log.info("Review task acknowledged: taskId={}, status={}", taskId, result.status());
         } catch (RuntimeException error) {
             log.error("Review Stream entry failed and remains pending: entry={}", record.getId(), error);
         }

@@ -2,6 +2,7 @@ package com.guodi.pragent.persistence.toolround;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
@@ -19,6 +20,7 @@ import com.guodi.pragent.persistence.toolround.StoredAssistantMessage.StoredTool
 import com.guodi.pragent.persistence.toolround.StoredToolResponseMessage.StoredToolResult;
 import com.guodi.pragent.reviewer.ReviewState;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.ReviewStatus;
 
 
 
@@ -28,14 +30,14 @@ public class ToolRoundStore{
     private final ToolRoundMapper toolRoundMapper;
     private final ReviewRunMapper reviewRunMapper;
     private final ObjectMapper objectMapper;
-    public ToolRoundStore( ToolRoundMapper toolRoundMapper,ReviewRunMapper reviewRunMapper,ObjectMapper objectMapper){
+    public ToolRoundStore(ToolRoundMapper toolRoundMapper,ReviewRunMapper reviewRunMapper,ObjectMapper objectMapper){
         this.toolRoundMapper = toolRoundMapper;
         this.reviewRunMapper = reviewRunMapper;
         this.objectMapper = objectMapper;
     }
 
     @Transactional
-    public Long beginRound(Long runId,  int roundNumber,AssistantMessage assistantMessage){
+    public Long beginRound(Long runId, int roundNumber,AssistantMessage assistantMessage){
         List<StoredToolCall> storedToolCalls = new ArrayList<>();
         //接收调用意图,存入数据库表
         for(ToolCall call : assistantMessage.getToolCalls()){
@@ -76,13 +78,18 @@ public class ToolRoundStore{
 
         StoredReviewState state;
         synchronized (reviewState) {
-            state = new StoredReviewState(reviewState.published(), reviewState.findingsSnapshot());
+            state = new StoredReviewState(reviewState.findingsSnapshot());
         }
 
         String responseJson = toJson(new StoredToolResponseMessage(results));
         String reviewStateJson = toJson(state);
 
+        boolean publicationReady = outcomes.size() == 1 && outcomes.getFirst().isSuccess()
+                && "publish_review".equals(outcomes.getFirst().getCall().name());
         ToolRoundEntity roundUpdate = new ToolRoundEntity();
+        if (publicationReady) {
+            roundUpdate.setPublicationPayloadJson(toJson(Map.of("body", outcomes.getFirst().getToolResponse().responseData())));
+        }
         roundUpdate.setStatus("COMPLETED");
         roundUpdate.setToolResponseJson(responseJson);
         int updatedRounds = toolRoundMapper.update(roundUpdate,
@@ -96,10 +103,13 @@ public class ToolRoundStore{
 
         ReviewRunEntity runUpdate = new ReviewRunEntity();
         runUpdate.setReviewStateJson(reviewStateJson);
+        if (publicationReady) {
+            runUpdate.setStatus(ReviewStatus.PUBLICATION_READY.name());
+        }
         int updatedRuns = reviewRunMapper.update(runUpdate,
                 Wrappers.<ReviewRunEntity>lambdaUpdate()
                         .eq(ReviewRunEntity::getId, runId)
-                        .eq(ReviewRunEntity::getStatus, "RUNNING"));
+                        .eq(ReviewRunEntity::getStatus, ReviewStatus.RUNNING.name()));
         if (updatedRuns != 1) {
             throw new IllegalStateException("review run is missing or not RUNNING: " + runId);
         }

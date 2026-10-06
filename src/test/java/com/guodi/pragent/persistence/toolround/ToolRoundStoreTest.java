@@ -21,6 +21,7 @@ import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.persistence.reviewrun.StoredReviewState;
 import com.guodi.pragent.reviewer.ReviewState;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.ReviewStatus;
 
 class ToolRoundStoreTest {
 
@@ -63,6 +64,25 @@ class ToolRoundStoreTest {
                 run.getValue().getReviewStateJson(), StoredReviewState.class);
         assertThat(persistedState.findings()).hasSize(1);
         assertThat(persistedState.findings().getFirst().id()).isEqualTo(findingId);
+    }
+
+    @Test
+    void publicationStoresFixedPayloadAndReadyInTheSameCommitMethod() throws Exception {
+        when(toolRoundMapper.update(any(), any())).thenReturn(1);
+        when(reviewRunMapper.update(any(), any())).thenReturn(1);
+        ReviewState state = new ReviewState("thread-1");
+        AssistantMessage.ToolCall call = new AssistantMessage.ToolCall("publish-1", "function", "publish_review", "{}");
+        ToolOutcome outcome = new ToolOutcome(call, new ToolResponseMessage.ToolResponse(call.id(), call.name(), "No issues found."), true);
+
+        store.completeRound(10L, 20L, List.of(outcome), state);
+
+        ArgumentCaptor<ToolRoundEntity> round = ArgumentCaptor.forClass(ToolRoundEntity.class);
+        verify(toolRoundMapper).update(round.capture(), any());
+        assertThat(objectMapper.readTree(round.getValue().getPublicationPayloadJson()).path("body").asText()).isEqualTo("No issues found.");
+        ArgumentCaptor<ReviewRunEntity> run = ArgumentCaptor.forClass(ReviewRunEntity.class);
+        verify(reviewRunMapper).update(run.capture(), any());
+        assertThat(run.getValue().getStatus()).isEqualTo(ReviewStatus.PUBLICATION_READY.name());
+        assertThat(objectMapper.readTree(run.getValue().getReviewStateJson()).has("published")).isFalse();
     }
 
     @Test

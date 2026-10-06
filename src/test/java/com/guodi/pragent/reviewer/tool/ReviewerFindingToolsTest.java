@@ -1,7 +1,6 @@
 package com.guodi.pragent.reviewer.tool;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -47,11 +46,9 @@ class ReviewerFindingToolsTest {
         writeTools.updateFinding(id, "resolved", null, null, null, "verified", context);
 
         assertThat(readTools.listFindings(context)).contains(id, "src/Example.java:17", "resolved");
-        assertThat(terminalTools.publishReview(context))
-                .contains("Review published locally: findings=1");
-        assertThat(state.published()).isTrue();
-        assertThatThrownBy(() -> terminalTools.publishReview(context))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("already published");
+        String body = terminalTools.publishReview(context);
+        assertThat(body).contains("Findings (1 total)", "Null dereference.");
+        assertThat(terminalTools.publishReview(context)).isEqualTo(body);
+        assertThat(state.findingsSnapshot()).hasSize(1);
     }
 }

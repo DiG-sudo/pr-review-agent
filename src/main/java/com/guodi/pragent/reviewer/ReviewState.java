@@ -10,20 +10,12 @@ public final class ReviewState {
 
     private final String threadId;
     private final Map<String, Finding> findings = new LinkedHashMap<>();
-    private boolean published;
 
     public ReviewState(String threadId) {
         this.threadId = requireText(threadId, "threadId");
     }
 
-    public synchronized String addFinding(
-            String severity,
-            String category,
-            String file,
-            int startLine,
-            String description,
-            String suggestion) {
-        requireOpen();
+    public synchronized String addFinding(String severity, String category, String file, int startLine, String description, String suggestion) {
         if (startLine <= 0) {
             throw new IllegalArgumentException("startLine must be positive");
         }
@@ -42,14 +34,7 @@ public final class ReviewState {
         return "Finding added: id=%s file=%s:%d".formatted(id, finding.file(), startLine);
     }
 
-    public synchronized String updateFinding(
-            String id,
-            String status,
-            String severity,
-            String description,
-            String suggestion,
-            String note) {
-        requireOpen();
+    public synchronized String updateFinding(String id, String status, String severity, String description, String suggestion, String note) {
         Finding current = findings.get(id);
         if (current == null) {
             throw new IllegalArgumentException("finding not found: " + id);
@@ -72,29 +57,28 @@ public final class ReviewState {
         return findings.isEmpty() ? "No findings recorded yet." : formatFindings();
     }
 
-    public synchronized String publishReview() {
-        requireOpen();
-        String body = findings.isEmpty() ? "No issues found." : formatFindings();
-        published = true;
-        return "Review published locally: findings=%d\n%s".formatted(findings.size(), body);
+    /** 只生成固定发布内容；任务状态由工具轮提交事务决定。 */
+    public synchronized String buildReviewBody() {
+        return findings.isEmpty() ? "No issues found." : formatFindings();
+    }
+
+    public synchronized void restoreFindings(List<Finding> snapshot) {
+        Map<String, Finding> restored = new LinkedHashMap<>();
+        for (Finding finding : snapshot) {
+            if (restored.putIfAbsent(finding.id(), finding) != null) {
+                throw new IllegalArgumentException("duplicate finding in snapshot: " + finding.id());
+            }
+        }
+        findings.clear();
+        findings.putAll(restored);
     }
 
     public String threadId() {
         return threadId;
     }
 
-    public synchronized boolean published() {
-        return published;
-    }
-
     public synchronized List<Finding> findingsSnapshot() {
         return List.copyOf(findings.values());
-    }
-
-    private void requireOpen() {
-        if (published) {
-            throw new IllegalStateException("review already published: " + threadId);
-        }
     }
 
     private String formatFindings() {

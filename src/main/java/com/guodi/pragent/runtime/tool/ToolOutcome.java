@@ -15,10 +15,7 @@ public final class ToolOutcome {
     private final ToolResponseMessage.ToolResponse toolResponse;
     private final boolean success;
 
-    public ToolOutcome(
-            AssistantMessage.ToolCall call,
-            ToolResponseMessage.ToolResponse toolResponse,
-            boolean success) {
+    public ToolOutcome(AssistantMessage.ToolCall call, ToolResponseMessage.ToolResponse toolResponse, boolean success) {
         this.call = Objects.requireNonNull(call, "call cannot be null");
         this.toolResponse = Objects.requireNonNull(toolResponse, "toolResponse cannot be null");
         this.success = success;

@@ -1,80 +1,73 @@
 package com.guodi.pragent.runtime;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
+import java.util.function.Function;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
-import com.guodi.pragent.harness.ToolRoundCoordinator;
-import com.guodi.pragent.runtime.tool.ToolBinding;
-import com.guodi.pragent.runtime.tool.ToolOutcome;
-import com.guodi.pragent.runtime.tool.ToolRegistry.Kind;
-import com.guodi.pragent.runtime.tool.ToolRegistry;
+import org.springframework.stereotype.Component;
 
-/** The model/tool loop. The caller prepares and later persists the run state. */
-public final class ReviewReActRuntime {
+import com.guodi.pragent.harness.ReviewHarness;
 
-    private final ChatModel chatModel;
-    private final ToolRoundCoordinator toolRounds;
-    private final ToolRegistry tools;
+/** 外部执行入口和核心 ReAct 循环；构造时装配 Harness 插入点。 */
+@Component
+public class ReviewReActRuntime {
 
-    public ReviewReActRuntime(ChatModel chatModel, ToolRoundCoordinator toolRounds,ToolRegistry tools) {
-        this.chatModel = Objects.requireNonNull(chatModel);
-        this.toolRounds = Objects.requireNonNull(toolRounds);
-        this.tools = Objects.requireNonNull(tools);
+    private final Function<Prompt, ChatResponse> modelHandler;
+    private final Function<ReviewExecution, ReviewRunResult> reasonHandler;
+    private final Function<Long, ReviewRunResult> runHandler;
+
+    public ReviewReActRuntime(ReviewHarness reviewHarness, ChatModel chatModel) {
+        this.modelHandler = wrapModelCall(reviewHarness, chatModel);
+        this.reasonHandler = wrapReasonCall(reviewHarness, modelHandler);
+        this.runHandler = wrapRunCall(reviewHarness, this::runLoop);
+
+        
+        this.toolHandler = wrapTool(reviewHarness, this::runLoop);
     }
 
-    public ReviewRunResult run(ReviewRunRequest request) {
-        Objects.requireNonNull(request);
-        List<Message> history = new ArrayList<>(request.initialMessages());
-        ToolCallingChatOptions options = ToolCallingChatOptions.builder()
-                .toolCallbacks(tools.getCallbacks())
-                .internalToolExecutionEnabled(false)
-                .build();
+    /** 消费者只传数据库任务 ID；任务准备和恢复由 Harness 负责。 */
+    public ReviewRunResult run(Long taskId) {
+        return runHandler.apply(taskId);
+    }
 
-        for (int step = 1; step <= request.maxSteps(); step++) {
-            // Harness beforeReasoning: select context, enforce budget, and select visible tools.
-            // Harness beforeModelCall: record the model-call start.
-            ChatResponse response = chatModel.call(new Prompt(List.copyOf(history), options));
-            // Harness afterModelCall: record response, usage, and latency.
-            AssistantMessage assistant = response.getResult().getOutput();
-            history.add(assistant);
+    private Function<Prompt, ChatResponse> wrapModelCall(ReviewHarness reviewHarness, ChatModel chatModel) {
+        return prompt -> reviewHarness.aroundModelCall(prompt, chatModel::call);
+    }
 
-            if (!assistant.hasToolCalls()) {
-                // Harness afterRun: decide how an unpublished text answer is recorded.
-                return new ReviewRunResult(ReviewRunResult.Status.MODEL_STOPPED,
-                        step, history);
+    private Function<ReviewExecution, ReviewRunResult> wrapReasonCall(ReviewHarness reviewHarness, Function<Prompt, ChatResponse> next) {
+        return execution -> reviewHarness.aroundReasoning(execution, next);
+    }
+
+    private Function<Long, ReviewRunResult> wrapRunCall(ReviewHarness reviewHarness, Function<ReviewExecution, ReviewRunResult> next) {
+        return taskId -> reviewHarness.aroundRun(taskId, next);
+    }
+    private Function<Long, ReviewRunResult> wrapTool(ReviewHarness reviewHarness, Function<ReviewExecution, ReviewRunResult> next) {
+        reviewHarness.aroundToolRound(null, null)
+    }
+
+    private ReviewRunResult runLoop(ReviewExecution execution) {
+       
+        while (true) {
+            ReviewRunResult result = reasonHandler.apply(execution);
+            if (result.status() != ReviewStatus.RUNNING) {
+                return result;
             }
-
-            // Harness beforeActing: check tool visibility and permissions.
-            List<ToolOutcome> outcomes = toolRounds.executeAndPersist(request.runId(), step,
-                    assistant, request.toolContext());
-            // Harness afterActing: record events and any domain-state changes.
-            history.add(ToolResponseMessage.builder()
-                    .responses(outcomes.stream().map(ToolOutcome::getToolResponse).toList())
-                    .build());
-
-            if (outcomes.stream().anyMatch(this::successfulTerminal)) {
-                // Harness afterRun: persist the successful terminal state.
-                return new ReviewRunResult(ReviewRunResult.Status.TERMINAL_TOOL_SUCCEEDED,
-                        step, history);
+            AssistantMessage assistantMessage = result.response().getResult().getOutput();
+            //由于ReviewStatus.RUNNING,response1.无工具调用,2.有工具调用不包含publish,3.有工具调用包含publish
+            if(!assistantMessage.hasToolCalls()){
+                //继续循环并且添加消息
+                execution.getHistory().add(new Message("尚未发布评论,,,"));
+                break;
             }
+            
+            //此时包含工具调用,交给aroundTool处理
+           
         }
-
-        // Harness afterRun: persist the max-steps state. On failure/finally: clean up resources.
-        return new ReviewRunResult(ReviewRunResult.Status.MAX_STEPS_REACHED,
-                request.maxSteps(), history);
     }
-
-    private boolean successfulTerminal(ToolOutcome outcome) {
-        ToolBinding binding = tools.findBinding(outcome.getCall().name());
-        return outcome.isSuccess() && binding != null && binding.getKind() == Kind.TERMINAL;
-    }
+       
+    
 }

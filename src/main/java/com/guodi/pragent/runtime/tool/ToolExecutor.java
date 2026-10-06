@@ -23,11 +23,7 @@ public final class ToolExecutor {
         return invokeCallback(call, binding, call.arguments(), toolContext);
     }
 
-    private ToolOutcome invokeCallback(
-            AssistantMessage.ToolCall call,
-            ToolBinding binding,
-            String arguments,
-            ToolContext toolContext) {
+    private ToolOutcome invokeCallback(AssistantMessage.ToolCall call, ToolBinding binding, String arguments, ToolContext toolContext) {
         try {
             String result = binding.getToolCallback().call(arguments, toolContext);
             return outcome(call, result == null ? "" : result, true);
@@ -46,10 +42,7 @@ public final class ToolExecutor {
         return outcome(call, message, false);
     }
 
-    private ToolOutcome outcome(
-            AssistantMessage.ToolCall call,
-            String responseData,
-            boolean success) {
+    private ToolOutcome outcome(AssistantMessage.ToolCall call, String responseData, boolean success) {
         return new ToolOutcome(
                 call,
                 new ToolResponseMessage.ToolResponse(call.id(), call.name(), responseData),

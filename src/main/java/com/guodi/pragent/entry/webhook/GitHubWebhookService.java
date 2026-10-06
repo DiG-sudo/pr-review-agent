@@ -11,6 +11,7 @@ import com.guodi.pragent.persistence.outbox.OutboxEventMapper;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.reviewer.ReviewRequest;
+import com.guodi.pragent.runtime.ReviewStatus;
 
 /** Persists one review task and its Outbox notification before HTTP acknowledgement. */
 @Service
@@ -34,7 +35,7 @@ public class GitHubWebhookService {
         review.setBaseSha(request.baseSha());
         review.setRepository(request.repository());
         review.setPullRequestNumber(request.pullRequestNumber());
-        review.setStatus("PENDING");
+        review.setStatus(ReviewStatus.PENDING.name());
         review.setPublicationKey(UUID.randomUUID().toString());
 
         try {
@@ -55,6 +56,6 @@ public class GitHubWebhookService {
         outboxEventMapper.insert(event);
 
         // ReviewOutboxPublisher sends this row to Redis Stream after accept() commits.
-        // ReviewStreamConsumer will call ReviewerAgent when it becomes available.
+        // ReviewStreamConsumer calls ReviewReActRuntime.run(taskId) after delivery.
     }
 }

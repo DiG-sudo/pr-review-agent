@@ -15,9 +15,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class ReviewWorkerConfig {
 
     @Bean(name = "reviewWorkerExecutor", destroyMethod = "shutdown")
-    public ThreadPoolExecutor reviewWorkerExecutor(
-            @Value("${pr-review.execution.workers:8}") int workers,
-            @Value("${pr-review.execution.queue-capacity:16}") int queueCapacity) {
+    public ThreadPoolExecutor reviewWorkerExecutor(@Value("${pr-review.execution.workers:8}") int workers, @Value("${pr-review.execution.queue-capacity:16}") int queueCapacity) {
         if (workers <= 0 || queueCapacity <= 0) {
             throw new IllegalArgumentException("review execution sizes must be positive");
         }

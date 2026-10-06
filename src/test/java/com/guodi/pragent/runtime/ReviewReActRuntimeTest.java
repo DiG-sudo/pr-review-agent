@@ -1,75 +1,34 @@
 package com.guodi.pragent.runtime;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import java.util.List;
-import java.util.Map;
-
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.model.ToolContext;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.ai.tool.ToolCallback;
 
+import com.guodi.pragent.harness.ReviewHarness;
 import com.guodi.pragent.harness.ToolRoundCoordinator;
-import com.guodi.pragent.runtime.tool.ToolOutcome;
-import com.guodi.pragent.runtime.tool.ToolRegistry;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 
 class ReviewReActRuntimeTest {
 
     @Test
-    void feedsTheCompletedToolRoundBackToTheModel() {
-        ChatModel model = mock(ChatModel.class);
+    void publishedTaskReturnsThroughHarnessWithoutEnteringModelLoop() {
+        ReviewRunMapper reviews = mock(ReviewRunMapper.class);
         ToolRoundCoordinator rounds = mock(ToolRoundCoordinator.class);
-        ToolRegistry tools = mock(ToolRegistry.class);
-        when(tools.getCallbacks()).thenReturn(new ToolCallback[0]);
+        ChatModel model = mock(ChatModel.class);
+        ReviewRunEntity task = new ReviewRunEntity();
+        task.setStatus(ReviewStatus.PUBLISHED.name());
+        when(reviews.selectById(7L)).thenReturn(task);
 
-        AssistantMessage.ToolCall call = new AssistantMessage.ToolCall(
-                "call-1", "function", "get_diff", "{}");
-        AssistantMessage toolRequest = AssistantMessage.builder()
-                .content("").toolCalls(List.of(call)).build();
-        AssistantMessage finalAnswer = new AssistantMessage("done");
-        when(model.call(any(Prompt.class))).thenReturn(
-                response(toolRequest), response(finalAnswer));
-        when(rounds.executeAndPersist(any(), anyInt(), any(), any())).thenReturn(
-                List.of(new ToolOutcome(call,
-                        new ToolResponseMessage.ToolResponse(
-                                "call-1", "get_diff", "diff content"), true)));
+        ReviewReActRuntime runtime = new ReviewReActRuntime(new ReviewHarness(reviews, rounds), model);
+        ReviewRunResult result = runtime.run(7L);
 
-        ReviewReActRuntime runtime = new ReviewReActRuntime(model, rounds, tools);
-        ReviewRunResult result = runtime.run(new ReviewRunRequest(7L,
-                List.of(new UserMessage("review this PR")),
-                new ToolContext(Map.of()), 3));
-
-        assertThat(result.status()).isEqualTo(ReviewRunResult.Status.MODEL_STOPPED);
-        assertThat(result.steps()).isEqualTo(2);
-        verify(rounds).executeAndPersist(any(), anyInt(), any(), any());
-        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
-        verify(model, org.mockito.Mockito.times(2)).call(prompts.capture());
-        List<Message> secondMessages = prompts.getAllValues().get(1).getInstructions();
-        assertThat(secondMessages).hasSize(3);
-        assertThat(secondMessages.get(1)).isSameAs(toolRequest);
-        assertThat(secondMessages.get(2)).isInstanceOf(ToolResponseMessage.class);
-        assertThat(((ToolResponseMessage) secondMessages.get(2)).getResponses().getFirst()
-                .responseData()).isEqualTo("diff content");
-        assertThat(((ToolCallingChatOptions) prompts.getAllValues().get(0).getOptions())
-                .getInternalToolExecutionEnabled()).isFalse();
-    }
-
-    private static ChatResponse response(AssistantMessage message) {
-        return new ChatResponse(List.of(new Generation(message)));
+        assertThat(result.status()).isEqualTo(ReviewStatus.PUBLISHED);
+        assertThat(result.response()).isNull();
+        verifyNoInteractions(model, rounds);
     }
 }

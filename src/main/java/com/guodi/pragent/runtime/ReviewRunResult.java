@@ -1,19 +1,16 @@
 package com.guodi.pragent.runtime;
 
-import java.util.List;
+import java.util.Objects;
 
-import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.model.ChatResponse;
 
-/** Loop outcome; the Harness will decide the persisted review status. */
-public record ReviewRunResult(Status status, int steps, List<Message> messages) {
-
-    public enum Status {
-        TERMINAL_TOOL_SUCCEEDED,
-        MODEL_STOPPED,
-        MAX_STEPS_REACHED
-    }
+/** RUNNING 携带本轮模型响应；其他状态只传递任务状态，不嵌套结果或复制历史。 */
+public record ReviewRunResult(ReviewStatus status, ChatResponse response) {
 
     public ReviewRunResult {
-        messages = List.copyOf(messages);
+        Objects.requireNonNull(status, "status");
+        if ((status == ReviewStatus.RUNNING) != (response != null)) {
+            throw new IllegalArgumentException("只有 RUNNING 结果必须携带模型响应");
+        }
     }
 }

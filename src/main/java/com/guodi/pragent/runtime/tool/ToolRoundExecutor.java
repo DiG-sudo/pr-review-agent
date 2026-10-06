@@ -23,18 +23,13 @@ public final class ToolRoundExecutor {
     private final ToolExecutor toolExecutor;
     private final ExecutorService executorService;
 
-    public ToolRoundExecutor(
-            ToolRegistry toolRegistry,
-            ToolExecutor toolExecutor,
-            @Qualifier("reviewReadExecutor") ExecutorService executorService) {
+    public ToolRoundExecutor(ToolRegistry toolRegistry, ToolExecutor toolExecutor, @Qualifier("reviewReadExecutor") ExecutorService executorService) {
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "toolRegistry cannot be null");
         this.toolExecutor = Objects.requireNonNull(toolExecutor, "toolExecutor cannot be null");
         this.executorService = Objects.requireNonNull(executorService, "executorService cannot be null");
     }
 
-    public List<ToolOutcome> executeRound(
-            AssistantMessage.ToolCall[] calls,
-            ToolContext toolContext) throws InterruptedException, ExecutionException {
+    public List<ToolOutcome> executeRound(AssistantMessage.ToolCall[] calls, ToolContext toolContext) throws InterruptedException, ExecutionException {
         List<List<Integer>> batches = buildExecutionBatches(calls);
         List<ToolOutcome> results = new ArrayList<>(calls.length);
 
@@ -42,11 +37,6 @@ public final class ToolRoundExecutor {
             if (batch.size() == 1) {
                 ToolOutcome outcome = toolExecutor.execute(calls[batch.get(0)], toolContext);
                 results.add(outcome);
-                ToolBinding binding = toolRegistry.findBinding(outcome.getCall().name());
-                if (outcome.isSuccess() && binding != null
-                        && binding.getKind() == Kind.TERMINAL) {
-                    return List.copyOf(results);
-                }
                 continue;
             }
 
@@ -88,9 +78,7 @@ public final class ToolRoundExecutor {
         return List.copyOf(batches);
     }
 
-    private static void addReadBatch(
-            List<List<Integer>> batches,
-            List<Integer> readBatch) {
+    private static void addReadBatch(List<List<Integer>> batches, List<Integer> readBatch) {
         if (readBatch.isEmpty()) {
             return;
         }
