@@ -2,9 +2,13 @@ package com.guodi.pragent.harness;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -13,43 +17,43 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
-import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.persistence.reviewrun.StoredReviewState;
 import com.guodi.pragent.persistence.toolround.StoredAssistantMessage;
 import com.guodi.pragent.persistence.toolround.StoredToolResponseMessage;
 import com.guodi.pragent.persistence.toolround.ToolRoundEntity;
 import com.guodi.pragent.persistence.toolround.ToolRoundMapper;
 import com.guodi.pragent.runtime.ReviewExecution;
-import com.guodi.pragent.runtime.ReviewStatus;
+import com.guodi.pragent.preparation.GitHubWorkspacePreparer.ReviewWorkspace;
+import com.guodi.pragent.reviewer.ReviewState;
+import com.guodi.pragent.reviewer.tool.ReviewToolContext;
 
 /** 只恢复 RUNNING 的本地已提交工具历史和 Findings；任务分流和远端发布归 Harness。 */
 @Component
 public class ReviewRunRestorer {
-    private final ReviewRunMapper reviews;
     private final ToolRoundMapper rounds;
     private final ObjectMapper json;
     private final TransactionTemplate transactions;
 
-    public ReviewRunRestorer(ReviewRunMapper reviews, ToolRoundMapper rounds, ObjectMapper json, TransactionTemplate transactions) {
-        this.reviews = reviews;
+    public ReviewRunRestorer(ToolRoundMapper rounds, ObjectMapper json, TransactionTemplate transactions) {
         this.rounds = rounds;
         this.json = json;
         this.transactions = transactions;
     }
 
-    /** 初始消息、工作区和累计预算由 aroundRun 载入；这里不创建另一套恢复结果。 */
-    public void restore(ReviewExecution execution) {
-        ReviewRunEntity task = reviews.selectById(execution.getRunId());
-        if (task == null || !ReviewStatus.RUNNING.name().equals(task.getStatus())) {
-            throw new IllegalStateException("只有 RUNNING 任务可以恢复: " + execution.getRunId());
-        }
-        if (task.getInitialMessagesJson() == null || task.getReviewStateJson() == null) {
-            throw new IllegalStateException("任务尚无完整初始化记录: " + task.getId());
-        }
+    /** 加载初始消息、工具历史和 Findings，创建本次恢复执行的上下文。 */
+    public ReviewExecution restore(ReviewRunEntity task, ReviewWorkspace workspace) {
         List<ToolRoundEntity> storedRounds = rounds.selectList(Wrappers.<ToolRoundEntity>lambdaQuery().eq(ToolRoundEntity::getRunId, task.getId()).orderByAsc(ToolRoundEntity::getRoundNumber));
         List<Message> history = new ArrayList<>();
         StoredReviewState state;
+        List<Message> initialMessages = new ArrayList<>();
         try {
+            for (var message : json.readTree(task.getInitialMessagesJson())) {
+                initialMessages.add(switch (message.get("type").asText()) {
+                    case "system" -> new SystemMessage(message.get("text").asText());
+                    case "user" -> new UserMessage(message.get("text").asText());
+                    default -> throw new IllegalStateException("不支持的初始消息类型");
+                });
+            }
             state = json.readValue(task.getReviewStateJson(), StoredReviewState.class);
             for (ToolRoundEntity round : storedRounds) {
                 if (!"COMPLETED".equals(round.getStatus())) {
@@ -88,11 +92,13 @@ public class ReviewRunRestorer {
                 }
             }
         });
-        execution.getReviewState().restoreFindings(state.findings());
-        execution.getHistory().clear();
-        execution.getHistory().addAll(history);
-        execution.setNextToolRoundNumber(storedRounds.isEmpty() ? 1 : storedRounds.getLast().getRoundNumber() + 1);
-        // TODO: 普通文本响应及继续提示的持久化和恢复，需要单独接入。
-        // TODO: 累计模型预算尚无数据库字段；接入前不能宣称恢复预算已完整实现。
+        ReviewState reviewState = new ReviewState(task.getThreadId());
+        reviewState.restoreFindings(state.findings());
+        ToolContext toolContext = new ToolContext(Map.of(ReviewToolContext.KEY,
+                new ReviewToolContext(workspace.workspaceDirectory(), reviewState)));
+        int nextRound = storedRounds.isEmpty() ? 1 : storedRounds.getLast().getRoundNumber() + 1;
+        // 普通文本及继续提示仅保留在运行内存中，恢复时只还原已完成工具轮次。
+        return new ReviewExecution(task.getId(), initialMessages, history, toolContext,
+                task.getModelCalls(), task.getMaxModelCalls(), nextRound);
     }
 }

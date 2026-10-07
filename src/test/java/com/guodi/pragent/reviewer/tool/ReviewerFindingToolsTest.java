@@ -19,7 +19,6 @@ class ReviewerFindingToolsTest {
     @Test
     void runsTheLocalReviewerTools(@TempDir Path fixture) throws IOException {
         Files.createDirectories(fixture.resolve("source/src"));
-        Files.writeString(fixture.resolve("metadata.json"), "{\"pr_number\":1}");
         Files.writeString(fixture.resolve("diff.patch"), "diff --git a/src/Example.java b/src/Example.java\n+danger();\n");
         Files.writeString(fixture.resolve("source/src/Example.java"), "class Example {\n  void danger() {}\n}\n");
         ReviewState state = new ReviewState("review-1");
@@ -33,7 +32,8 @@ class ReviewerFindingToolsTest {
         assertThat(ToolCallbacks.from(readTools)).hasSize(4);
         assertThat(ToolCallbacks.from(writeTools)).hasSize(2);
         assertThat(ToolCallbacks.from(terminalTools)).hasSize(1);
-        assertThat(readTools.getDiff(null, null, context)).contains("pr_number", "+danger();");
+        assertThat(readTools.getDiff(null, null, context)).contains("+danger();");
+        assertThat(readTools.getDiff(2, 1, context)).contains("2: +danger();").doesNotContain("diff --git");
         assertThat(readTools.readFile("src/Example.java", 1, 10, context))
                 .contains("1: class Example");
         assertThat(readTools.searchCode("danger", null, 10, context))

@@ -54,10 +54,11 @@ public final class GitHubWorkspacePreparer {
     /** The returned handle owns the temporary workspace. */
     public ReviewWorkspace prepareWorkspace(ReviewRequest request) {
         validateRequest(request);
+        String[] repo = request.repository().split("/", 2);
         Path workspace = null;
         try {
             JsonNode pr = github.get()
-                    .uri("/repos/{repository}/pulls/{number}", request.repository(), request.pullRequestNumber())
+                    .uri("/repos/{owner}/{repo}/pulls/{number}", repo[0], repo[1], request.pullRequestNumber())
                     .headers(headers -> {
                         headers.set("Accept", "application/vnd.github+json");
                         headers.set("X-GitHub-Api-Version", "2022-11-28");

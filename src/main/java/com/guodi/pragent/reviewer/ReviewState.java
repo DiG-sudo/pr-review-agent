@@ -16,6 +16,7 @@ public final class ReviewState {
     }
 
     public synchronized String addFinding(String severity, String category, String file, int startLine, String description, String suggestion) {
+        // TODO: 新增前按文件、位置和问题内容识别重复 Finding，避免同一问题重复记录。
         if (startLine <= 0) {
             throw new IllegalArgumentException("startLine must be positive");
         }
@@ -35,6 +36,7 @@ public final class ReviewState {
     }
 
     public synchronized String updateFinding(String id, String status, String severity, String description, String suggestion, String note) {
+        // TODO: 更新问题内容时检查是否与其他 Finding 重复，排除当前 id。
         Finding current = findings.get(id);
         if (current == null) {
             throw new IllegalArgumentException("finding not found: " + id);

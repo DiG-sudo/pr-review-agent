@@ -1,10 +1,12 @@
 package com.guodi.pragent.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Path;
@@ -20,9 +22,12 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ToolContext;
 
 import com.guodi.pragent.persistence.toolround.ToolRoundStore;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.reviewer.ReviewState;
 import com.guodi.pragent.reviewer.tool.ReviewToolContext;
 import com.guodi.pragent.runtime.ReviewExecution;
+import com.guodi.pragent.runtime.ReviewStatus;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
 import com.guodi.pragent.runtime.tool.ToolRoundExecutor;
 
@@ -32,7 +37,11 @@ class ToolRoundCoordinatorTest {
     void mixedPublicationIsRejectedButOtherCallsExecuteAndAllResultsPersist(@TempDir Path workspace) throws Exception {
         ToolRoundStore store = mock(ToolRoundStore.class);
         ToolRoundExecutor executor = mock(ToolRoundExecutor.class);
-        ToolRoundCoordinator coordinator = new ToolRoundCoordinator(store, executor);
+        ReviewRunMapper runs = mock(ReviewRunMapper.class);
+        ReviewRunEntity task = new ReviewRunEntity();
+        task.setStatus(ReviewStatus.RUNNING.name());
+        when(runs.selectById(7L)).thenReturn(task);
+        ToolRoundCoordinator coordinator = new ToolRoundCoordinator(store, executor, runs);
         ReviewState state = new ReviewState("thread");
         ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(workspace, state)));
         ReviewExecution execution = new ReviewExecution(7L, List.of(new UserMessage("review")), List.of(), context, 1, 10, 3);
@@ -54,5 +63,34 @@ class ToolRoundCoordinatorTest {
         assertThat(outcomes.get(1).getToolResponse().id()).isEqualTo(publish.id());
         verify(store).completeRound(7L, 11L, outcomes, state);
         assertThat(execution.getNextToolRoundNumber()).isEqualTo(4);
+    }
+
+    @Test
+    void missingOrNonRunningTaskIsRejectedBeforePersistenceAndExecution(@TempDir Path workspace) {
+        ToolRoundStore store = mock(ToolRoundStore.class);
+        ToolRoundExecutor executor = mock(ToolRoundExecutor.class);
+        ReviewRunMapper runs = mock(ReviewRunMapper.class);
+        ToolRoundCoordinator coordinator = new ToolRoundCoordinator(store, executor, runs);
+        ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY,
+                new ReviewToolContext(workspace, new ReviewState("thread"))));
+        ReviewExecution execution = new ReviewExecution(7L, List.of(new UserMessage("review")),
+                List.of(), context, 1, 10, 3);
+        AssistantMessage assistant = AssistantMessage.builder().content("").toolCalls(List.of(
+                new AssistantMessage.ToolCall("read", "function", "get_diff", "{}"))).build();
+
+        assertThatThrownBy(() -> coordinator.executeAndPersist(execution, assistant))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("not RUNNING");
+        for (ReviewStatus status : ReviewStatus.values()) {
+            if (status == ReviewStatus.RUNNING) {
+                continue;
+            }
+            ReviewRunEntity task = new ReviewRunEntity();
+            task.setStatus(status.name());
+            when(runs.selectById(7L)).thenReturn(task);
+            assertThatThrownBy(() -> coordinator.executeAndPersist(execution, assistant))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("not RUNNING");
+        }
+        verifyNoInteractions(store, executor);
+        assertThat(execution.getNextToolRoundNumber()).isEqualTo(3);
     }
 }

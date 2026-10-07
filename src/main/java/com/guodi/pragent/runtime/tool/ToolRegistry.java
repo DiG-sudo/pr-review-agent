@@ -4,9 +4,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.stereotype.Component;
 
 /** Holds the assembled tool bindings used by the runtime. */
 public final class ToolRegistry {

@@ -3,12 +3,15 @@ package com.guodi.pragent.runtime.tool;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 import org.springframework.ai.chat.messages.AssistantMessage.ToolCall;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
@@ -43,8 +46,15 @@ public final class ToolRoundExecutor {
             List<Future<ToolOutcome>> futures = new ArrayList<>(batch.size());
             for (Integer index : batch) {
                 ToolCall toolCall = calls[index];
-                futures.add(executorService.submit(
-                        () -> toolExecutor.execute(toolCall, toolContext)));
+                try {
+                    futures.add(executorService.submit(() -> toolExecutor.execute(toolCall, toolContext)));
+                } catch (RejectedExecutionException error) {
+                    ToolOutcome failure = new ToolOutcome(toolCall,
+                            new ToolResponse(toolCall.id(), toolCall.name(),
+                                    "Tool scheduling failed: executor rejected the call. Try again later."),
+                            false);
+                    futures.add(CompletableFuture.completedFuture(failure));
+                }
             }
             for (int index = 0; index < batch.size(); index++) {
                 results.add(futures.get(index).get());

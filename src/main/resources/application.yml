@@ -20,7 +20,10 @@ spring:
       port: ${PR_REVIEW_REDIS_PORT:6379}
 
 pr-review:
+  context:
+    max-initial-diff-chars: ${PR_REVIEW_MAX_INITIAL_DIFF_CHARS:30000}
   execution:
+    max-model-calls: ${PR_REVIEW_MAX_MODEL_CALLS:20}
     workers: ${PR_REVIEW_WORKERS:8}
     queue-capacity: ${PR_REVIEW_QUEUE_CAPACITY:64}
   events:

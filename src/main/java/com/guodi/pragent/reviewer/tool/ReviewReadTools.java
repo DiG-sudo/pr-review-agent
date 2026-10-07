@@ -22,15 +22,11 @@ public final class ReviewReadTools {
     private static final int DEFAULT_SEARCH_RESULTS = 50;
     private static final int MAX_SEARCH_RESULTS = 200;
 
-    @Tool(name = "get_diff", description = "Read a page of the current local PR diff and its metadata.")
+    @Tool(name = "get_diff", description = "Read a page of the full PR diff from the current workspace.")
     public String getDiff(@ToolParam(required = false, description = "First diff line to return, starting at 1") Integer startLine, @ToolParam(required = false, description = "Number of diff lines to return, maximum 500") Integer lineCount, ToolContext toolContext) {
         Path fixtureRoot = ReviewToolContext.from(toolContext).fixtureRoot();
-        Path metadataPath = requireFile(fixtureRoot.resolve("metadata.json"), "metadata.json");
         Path diffPath = requireFile(fixtureRoot.resolve("diff.patch"), "diff.patch");
-        return "PR metadata:\n"
-                + readText(metadataPath)
-                + "\n\n"
-                + page(diffPath, startLine, lineCount, "Diff");
+        return page(diffPath, startLine, lineCount, "Diff");
     }
 
     @Tool(name = "read_file", description = "Read a page of a source file from the local PR workspace.")
@@ -159,14 +155,6 @@ public final class ReviewReadTools {
             return realPath;
         } catch (IOException error) {
             throw new IllegalArgumentException(label + " does not exist: " + path, error);
-        }
-    }
-
-    private static String readText(Path path) {
-        try {
-            return Files.readString(path, StandardCharsets.UTF_8);
-        } catch (IOException error) {
-            throw new IllegalStateException("failed to read " + path.getFileName(), error);
         }
     }
 

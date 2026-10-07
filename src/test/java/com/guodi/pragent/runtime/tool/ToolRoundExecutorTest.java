@@ -2,11 +2,16 @@ package com.guodi.pragent.runtime.tool;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -17,6 +22,42 @@ import org.springframework.ai.tool.ToolCallback;
 import com.guodi.pragent.runtime.tool.ToolRegistry.Kind;
 
 class ToolRoundExecutorTest {
+
+    @Test
+    void rejectedSubmissionBecomesOrderedFailureAndOtherCallsContinue() throws Exception {
+        ToolRegistry registry = mock(ToolRegistry.class);
+        ToolExecutor executor = mock(ToolExecutor.class);
+        ExecutorService pool = mock(ExecutorService.class);
+        ToolContext context = new ToolContext(Map.of());
+        AssistantMessage.ToolCall first = call("1", "read_file");
+        AssistantMessage.ToolCall rejected = call("2", "read_file");
+        AssistantMessage.ToolCall third = call("3", "read_file");
+        AssistantMessage.ToolCall write = call("4", "add_finding");
+        when(registry.findBinding("read_file")).thenReturn(binding(Kind.READ));
+        when(registry.findBinding("add_finding")).thenReturn(binding(Kind.WRITE));
+        when(executor.execute(first, context)).thenReturn(outcome(first));
+        when(executor.execute(third, context)).thenReturn(outcome(third));
+        when(executor.execute(write, context)).thenReturn(outcome(write));
+        AtomicInteger submissions = new AtomicInteger();
+        when(pool.submit(org.mockito.ArgumentMatchers.<Callable<ToolOutcome>>any())).thenAnswer(invocation -> {
+            if (submissions.incrementAndGet() == 2) {
+                throw new RejectedExecutionException("queue full");
+            }
+            Callable<ToolOutcome> task = invocation.getArgument(0);
+            return CompletableFuture.completedFuture(task.call());
+        });
+
+        var results = new ToolRoundExecutor(registry, executor, pool).executeRound(
+                new AssistantMessage.ToolCall[] {first, rejected, third, write}, context);
+
+        assertThat(results).extracting(result -> result.getCall().id()).containsExactly("1", "2", "3", "4");
+        assertThat(results).extracting(ToolOutcome::isSuccess).containsExactly(true, false, true, true);
+        assertThat(results.get(1).getToolResponse().id()).isEqualTo("2");
+        assertThat(results.get(1).getToolResponse().responseData()).contains("Tool scheduling failed");
+        verify(executor, never()).execute(rejected, context);
+        verify(executor).execute(third, context);
+        verify(executor).execute(write, context);
+    }
 
     @Test
     void completesAllCallsEvenAfterPublicationTool() throws Exception {

@@ -10,7 +10,10 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.stereotype.Component;
 
 import com.guodi.pragent.persistence.toolround.ToolRoundStore;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
+import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.runtime.ReviewExecution;
+import com.guodi.pragent.runtime.ReviewStatus;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
 import com.guodi.pragent.runtime.tool.ToolRoundExecutor;
 
@@ -19,20 +22,30 @@ import com.guodi.pragent.runtime.tool.ToolRoundExecutor;
 public class ToolRoundCoordinator {
     private final ToolRoundStore toolRoundStore;
     private final ToolRoundExecutor toolRoundExecutor;
+    private final ReviewRunMapper reviewRunMapper;
 
-    public ToolRoundCoordinator(ToolRoundStore toolRoundStore, ToolRoundExecutor toolRoundExecutor) {
+    public ToolRoundCoordinator(ToolRoundStore toolRoundStore, ToolRoundExecutor toolRoundExecutor, ReviewRunMapper reviewRunMapper) {
         this.toolRoundStore = toolRoundStore;
         this.toolRoundExecutor = toolRoundExecutor;
+        this.reviewRunMapper = reviewRunMapper;
     }
 
     public List<ToolOutcome> executeAndPersist(ReviewExecution execution, AssistantMessage assistantMessage) {
+        // before：确认任务仍为 RUNNING，保存原始调用意图，过滤混合批次中的发布调用。
         List<ToolCall> calls = assistantMessage.getToolCalls();
         if (calls.isEmpty()) {
             throw new IllegalArgumentException("tool round requires tool calls");
         }
+        ReviewRunEntity task = reviewRunMapper.selectById(execution.getRunId());
+        if (task == null || !ReviewStatus.RUNNING.name().equals(task.getStatus())) {
+            throw new IllegalStateException("review run is missing or not RUNNING: " + execution.getRunId());
+        }
         Long roundId = toolRoundStore.beginRound(execution.getRunId(), execution.getNextToolRoundNumber(), assistantMessage);
+
         boolean mixedPublication = calls.size() > 1 && calls.stream().anyMatch(call -> "publish_review".equals(call.name()));
+
         ToolCall[] allowed = calls.stream().filter(call -> !mixedPublication || !"publish_review".equals(call.name())).toArray(ToolCall[]::new);
+        // 执行：按串并行规则调度，并按待执行调用顺序返回结果。
         List<ToolOutcome> executed;
         try {
             executed = toolRoundExecutor.executeRound(allowed, execution.getToolContext());
@@ -43,6 +56,7 @@ public class ToolRoundCoordinator {
             throw new IllegalStateException("tool round execution failed", error.getCause());
         }
 
+        // after：按原始顺序补入被拒绝的发布结果，提交完整结果和状态快照。
         List<ToolOutcome> outcomes = new ArrayList<>(calls.size());
         int index = 0;
         for (ToolCall call : calls) {

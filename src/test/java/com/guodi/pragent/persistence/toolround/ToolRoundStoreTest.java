@@ -82,6 +82,7 @@ class ToolRoundStoreTest {
         ArgumentCaptor<ReviewRunEntity> run = ArgumentCaptor.forClass(ReviewRunEntity.class);
         verify(reviewRunMapper).update(run.capture(), any());
         assertThat(run.getValue().getStatus()).isEqualTo(ReviewStatus.PUBLICATION_READY.name());
+        assertThat(run.getValue().getPublicationPayloadJson()).isEqualTo(round.getValue().getPublicationPayloadJson());
         assertThat(objectMapper.readTree(run.getValue().getReviewStateJson()).has("published")).isFalse();
     }
 

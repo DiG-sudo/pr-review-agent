@@ -104,6 +104,7 @@ public class ToolRoundStore{
         ReviewRunEntity runUpdate = new ReviewRunEntity();
         runUpdate.setReviewStateJson(reviewStateJson);
         if (publicationReady) {
+            runUpdate.setPublicationPayloadJson(roundUpdate.getPublicationPayloadJson());
             runUpdate.setStatus(ReviewStatus.PUBLICATION_READY.name());
         }
         int updatedRuns = reviewRunMapper.update(runUpdate,

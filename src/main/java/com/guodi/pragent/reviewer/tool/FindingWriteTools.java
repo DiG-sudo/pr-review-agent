@@ -11,6 +11,7 @@ public final class FindingWriteTools {
 
     @Tool(name = "add_finding", description = "Record one real issue found in the PR diff.")
     public String addFinding(@ToolParam(description = "Finding severity") String severity, @ToolParam(description = "Finding category") String category, @ToolParam(description = "Repository-relative file path") String file, @ToolParam(description = "Changed line number in the new file") int startLine, @ToolParam(description = "Concrete explanation of the issue") String description, @ToolParam(required = false, description = "Optional small code suggestion") String suggestion, ToolContext toolContext) {
+        // TODO: 写入前校验 file 属于当前 PR Diff，且 startLine 是该文件 Diff 中有效的新文件变更行。
         return ReviewToolContext.from(toolContext)
                 .reviewState()
                 .addFinding(severity, category, file, startLine, description, suggestion);

@@ -28,7 +28,12 @@ class ReviewHarnessTest {
     @Test
     void readyAndTerminalStatesStopReasoningBeforeAnyModelCall(@TempDir Path workspace) {
         ReviewRunMapper reviews = mock(ReviewRunMapper.class);
-        ReviewHarness harness = new ReviewHarness(reviews, mock(ToolRoundCoordinator.class));
+        ReviewHarness harness = new ReviewHarness(reviews, mock(ToolRoundCoordinator.class),
+                mock(com.guodi.pragent.harness.ReviewContextBuilder.class),
+                new com.guodi.pragent.runtime.tool.ToolRegistry(List.of()), new com.fasterxml.jackson.databind.ObjectMapper(),
+                mock(com.guodi.pragent.harness.ReviewRunRestorer.class),
+                mock(com.guodi.pragent.preparation.GitHubWorkspacePreparer.class),
+                mock(GitHubReviewLookup.class), mock(GitHubReviewPublisher.class));
         ToolContext tools = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(workspace, new ReviewState("thread"))));
         ReviewExecution execution = new ReviewExecution(7L, List.of(new UserMessage("review")), List.of(), tools, 8, 8, 1);
         AtomicInteger calls = new AtomicInteger();
