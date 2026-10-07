@@ -5,8 +5,13 @@ server:
 spring:
   ai:
     openai:
-      # 仅用于在尚未接入 Agent 时启动应用；真正调用模型时必须设置环境变量。
-      api-key: ${SPRING_AI_OPENAI_API_KEY:local-webhook-placeholder}
+      # 从启动进程的环境变量读取 OpenAI 兼容服务配置。
+      api-key: ${AI_API_KEY}
+      base-url: ${AI_BASE_URL}
+      chat:
+        completions-path: /chat/completions
+        options:
+          model: ${AI_MODEL}
   datasource:
     url: ${PR_REVIEW_DB_URL:jdbc:mysql://127.0.0.1:3306/pr_review_agent}
     username: ${PR_REVIEW_DB_USERNAME:pr_agent}

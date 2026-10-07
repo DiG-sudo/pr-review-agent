@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Stream;
@@ -39,7 +40,7 @@ public final class ReviewReadTools {
         return page(file, startLine, lineCount, sourceDirectory.relativize(file).toString());
     }
 
-    @Tool(name = "search_code", description = "Search source files in the local PR workspace without using a shell.")
+    @Tool(name = "search_code", description = "Search regular source files in the local PR workspace without using a shell. Symbolic links are skipped.")
     public String searchCode(@ToolParam(description = "Case-sensitive text to find") String query, @ToolParam(required = false, description = "Optional repository-relative file or directory") String path, @ToolParam(required = false, description = "Maximum matches to return, maximum 200") Integer maxResults, ToolContext toolContext) {
         String needle = requireText(query, "query");
         Path sourceDirectory = sourceDirectory(toolContext);
@@ -49,7 +50,7 @@ public final class ReviewReadTools {
         int matches = 0;
 
         try (Stream<Path> paths = Files.walk(base)) {
-            var iterator = paths.filter(Files::isRegularFile).iterator();
+            var iterator = paths.filter(file -> Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)).iterator();
             while (iterator.hasNext() && matches < limit) {
                 Path file = iterator.next();
                 try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {

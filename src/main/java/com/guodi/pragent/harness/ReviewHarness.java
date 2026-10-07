@@ -91,9 +91,8 @@ public class ReviewHarness {
                 task.getPullRequestNumber(), task.getHeadSha(), task.getBaseSha(), null);
         ReviewRunResult result;
         try (ReviewWorkspace workspace = workspacePreparer.prepareWorkspace(request)) {
-            ReviewExecution execution = task.getInitialMessagesJson() == null
-                    ? initializeRun(task, workspace)
-                    : reviewRunRestorer.restore(task, workspace);
+
+            ReviewExecution execution = task.getInitialMessagesJson() == null ? initializeRun(task, workspace) : reviewRunRestorer.restore(task, workspace);
             //middle
             result = next.apply(execution);
         } catch (IOException error) {

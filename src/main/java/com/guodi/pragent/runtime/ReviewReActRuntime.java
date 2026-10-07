@@ -65,10 +65,10 @@ public class ReviewReActRuntime {
             }
             //此时包含工具调用,交给aroundTool处理
             List<ToolOutcome> outcomes = reviewHarness.aroundToolRound(execution, assistantMessage);
+            
             execution.getHistory().add(assistantMessage);
             execution.getHistory().add(ToolResponseMessage.builder()
                     .responses(outcomes.stream().map(ToolOutcome::getToolResponse).toList()).build());
-
         }
     }
 

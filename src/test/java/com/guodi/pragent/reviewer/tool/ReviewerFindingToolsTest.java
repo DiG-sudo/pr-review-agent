@@ -17,6 +17,32 @@ import com.guodi.pragent.reviewer.ReviewState;
 class ReviewerFindingToolsTest {
 
     @Test
+    void publicationCallbackPreservesExactPlainText(@TempDir Path fixture) {
+        ReviewState state = new ReviewState("plain-text");
+        ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(fixture, state)));
+        var callback = ToolCallbacks.from(new ReviewTerminalTools())[0];
+        assertThat(callback.call("{}", context)).isEqualTo("No issues found.");
+        state.addFinding("high", "correctness", "Example.java", 1, "First line \"quoted\"\nSecond line \\ literal", null);
+        assertThat(callback.call("{}", context)).isEqualTo(state.buildReviewBody())
+                .contains("\n", "\"quoted\"", "\\ literal");
+    }
+
+    @Test
+    void searchSkipsFileAndDirectorySymlinksButReadsRegularFiles(@TempDir Path fixture) throws IOException {
+        Path source = Files.createDirectories(fixture.resolve("source"));
+        Path outside = Files.createDirectories(fixture.resolve("outside"));
+        Files.writeString(source.resolve("Example.java"), "needle normal source");
+        Files.writeString(outside.resolve("secret.txt"), "needle outside source");
+        Files.createSymbolicLink(source.resolve("external.java"), outside.resolve("secret.txt"));
+        Files.createSymbolicLink(source.resolve("external-dir"), outside);
+        Files.createSymbolicLink(source.resolve("internal.java"), source.resolve("Example.java"));
+        ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY,
+                new ReviewToolContext(fixture, new ReviewState("links"))));
+        assertThat(new ReviewReadTools().searchCode("needle", null, 10, context))
+                .isEqualTo("Example.java:1: needle normal source");
+    }
+
+    @Test
     void runsTheLocalReviewerTools(@TempDir Path fixture) throws IOException {
         Files.createDirectories(fixture.resolve("source/src"));
         Files.writeString(fixture.resolve("diff.patch"), "diff --git a/src/Example.java b/src/Example.java\n+danger();\n");
