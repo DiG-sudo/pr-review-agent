@@ -16,25 +16,24 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
-import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentEntity;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentMapper;
 import com.guodi.pragent.persistence.reviewrun.StoredReviewState;
 import com.guodi.pragent.reviewer.ReviewState;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
-import com.guodi.pragent.runtime.ReviewStatus;
 
 class ToolRoundStoreTest {
 
     private final ToolRoundMapper toolRoundMapper = mock(ToolRoundMapper.class);
-    private final ReviewRunMapper reviewRunMapper = mock(ReviewRunMapper.class);
+    private final ReviewAgentMapper reviewAgentMapper = mock(ReviewAgentMapper.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ToolRoundStore store =
-            new ToolRoundStore(toolRoundMapper, reviewRunMapper, objectMapper);
+            new ToolRoundStore(toolRoundMapper, reviewAgentMapper, objectMapper);
 
     @Test
     void completeStoresToolResultAndCurrentFindingSnapshot() throws Exception {
         when(toolRoundMapper.update(any(), any())).thenReturn(1);
-        when(reviewRunMapper.update(any(), any())).thenReturn(1);
+        when(reviewAgentMapper.update(any(), any())).thenReturn(1);
 
         ReviewState state = new ReviewState("thread-1");
         String added = state.addFinding(
@@ -58,32 +57,30 @@ class ToolRoundStoreTest {
         assertThat(response.responses().getFirst().callId()).isEqualTo("call-1");
         assertThat(response.responses().getFirst().content()).contains(findingId);
 
-        ArgumentCaptor<ReviewRunEntity> run = ArgumentCaptor.forClass(ReviewRunEntity.class);
-        verify(reviewRunMapper).update(run.capture(), any());
+        ArgumentCaptor<ReviewAgentEntity> agent = ArgumentCaptor.forClass(ReviewAgentEntity.class);
+        verify(reviewAgentMapper).update(agent.capture(), any());
         StoredReviewState persistedState = objectMapper.readValue(
-                run.getValue().getReviewStateJson(), StoredReviewState.class);
+                agent.getValue().getReviewStateJson(), StoredReviewState.class);
         assertThat(persistedState.findings()).hasSize(1);
         assertThat(persistedState.findings().getFirst().id()).isEqualTo(findingId);
+        assertThat(agent.getValue().getSuccess()).isNull();
     }
 
     @Test
-    void publicationStoresFixedPayloadAndReadyInTheSameCommitMethod() throws Exception {
+    void publicationCompletesAgentInTheSameCommitMethod() throws Exception {
         when(toolRoundMapper.update(any(), any())).thenReturn(1);
-        when(reviewRunMapper.update(any(), any())).thenReturn(1);
+        when(reviewAgentMapper.update(any(), any())).thenReturn(1);
         ReviewState state = new ReviewState("thread-1");
         AssistantMessage.ToolCall call = new AssistantMessage.ToolCall("publish-1", "function", "publish_review", "{}");
         ToolOutcome outcome = new ToolOutcome(call, new ToolResponseMessage.ToolResponse(call.id(), call.name(), "No issues found."), true);
 
-        store.completeRound(10L, 20L, List.of(outcome), state);
+        boolean completed = store.completeRound(10L, 20L, List.of(outcome), state);
 
-        ArgumentCaptor<ToolRoundEntity> round = ArgumentCaptor.forClass(ToolRoundEntity.class);
-        verify(toolRoundMapper).update(round.capture(), any());
-        assertThat(objectMapper.readTree(round.getValue().getPublicationPayloadJson()).path("body").asText()).isEqualTo("No issues found.");
-        ArgumentCaptor<ReviewRunEntity> run = ArgumentCaptor.forClass(ReviewRunEntity.class);
-        verify(reviewRunMapper).update(run.capture(), any());
-        assertThat(run.getValue().getStatus()).isEqualTo(ReviewStatus.PUBLICATION_READY.name());
-        assertThat(run.getValue().getPublicationPayloadJson()).isEqualTo(round.getValue().getPublicationPayloadJson());
-        assertThat(objectMapper.readTree(run.getValue().getReviewStateJson()).has("published")).isFalse();
+        assertThat(completed).isTrue();
+        ArgumentCaptor<ReviewAgentEntity> agent = ArgumentCaptor.forClass(ReviewAgentEntity.class);
+        verify(reviewAgentMapper).update(agent.capture(), any());
+        assertThat(agent.getValue().getSuccess()).isTrue();
+        assertThat(objectMapper.readTree(agent.getValue().getReviewStateJson()).has("published")).isFalse();
     }
 
     @Test
@@ -99,6 +96,6 @@ class ToolRoundStoreTest {
         assertThatThrownBy(() -> store.completeRound(10L, 20L, List.of(outcome), state))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("not OPEN");
-        verifyNoInteractions(reviewRunMapper);
+        verifyNoInteractions(reviewAgentMapper);
     }
 }

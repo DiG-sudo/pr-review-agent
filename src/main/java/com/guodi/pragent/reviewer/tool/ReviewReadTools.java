@@ -23,11 +23,10 @@ public final class ReviewReadTools {
     private static final int DEFAULT_SEARCH_RESULTS = 50;
     private static final int MAX_SEARCH_RESULTS = 200;
 
-    @Tool(name = "get_diff", description = "Read a page of the full PR diff from the current workspace.")
+    @Tool(name = "get_diff", description = "Read a page of the changed-file diff assigned to the current review Agent.")
     public String getDiff(@ToolParam(required = false, description = "First diff line to return, starting at 1") Integer startLine, @ToolParam(required = false, description = "Number of diff lines to return, maximum 500") Integer lineCount, ToolContext toolContext) {
-        Path fixtureRoot = ReviewToolContext.from(toolContext).fixtureRoot();
-        Path diffPath = requireFile(fixtureRoot.resolve("diff.patch"), "diff.patch");
-        return page(diffPath, startLine, lineCount, "Diff");
+        return pageLines(ReviewToolContext.from(toolContext).scopedDiff().lines().toList(),
+                startLine, lineCount, "Diff");
     }
 
     @Tool(name = "read_file", description = "Read a page of a source file from the local PR workspace.")
@@ -84,34 +83,39 @@ public final class ReviewReadTools {
     }
 
     private static String page(Path file, Integer requestedStart, Integer requestedCount, String label) {
+        try {
+            return pageLines(Files.readAllLines(file, StandardCharsets.UTF_8),
+                    requestedStart, requestedCount, label);
+        } catch (IOException error) {
+            throw new IllegalStateException("failed to read " + label, error);
+        }
+    }
+
+    private static String pageLines(List<String> lines, Integer requestedStart,
+            Integer requestedCount, String label) {
         int start = requestedStart == null ? 1 : requestedStart;
         int count = positiveLimit(requestedCount, DEFAULT_PAGE_LINES, MAX_PAGE_LINES, "lineCount");
         if (start <= 0) {
             throw new IllegalArgumentException("startLine must be positive");
         }
-        try {
-            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
-            if (start > lines.size() && !lines.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "startLine exceeds file length: " + start + " > " + lines.size());
-            }
-            int from = Math.min(start - 1, lines.size());
-            int to = Math.min(from + count, lines.size());
-            StringBuilder output = new StringBuilder(label)
-                    .append(" lines ")
-                    .append(lines.isEmpty() ? 0 : from + 1)
-                    .append("-")
-                    .append(to)
-                    .append(" of ")
-                    .append(lines.size())
-                    .append(":");
-            for (int index = from; index < to; index++) {
-                output.append("\n").append(index + 1).append(": ").append(lines.get(index));
-            }
-            return output.toString();
-        } catch (IOException error) {
-            throw new IllegalStateException("failed to read " + label, error);
+        if (start > lines.size() && !lines.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "startLine exceeds file length: " + start + " > " + lines.size());
         }
+        int from = Math.min(start - 1, lines.size());
+        int to = Math.min(from + count, lines.size());
+        StringBuilder output = new StringBuilder(label)
+                .append(" lines ")
+                .append(lines.isEmpty() ? 0 : from + 1)
+                .append("-")
+                .append(to)
+                .append(" of ")
+                .append(lines.size())
+                .append(":");
+        for (int index = from; index < to; index++) {
+            output.append("\n").append(index + 1).append(": ").append(lines.get(index));
+        }
+        return output.toString();
     }
 
     private static Path sourceDirectory(ToolContext toolContext) {
@@ -140,18 +144,6 @@ public final class ReviewReadTools {
             Path realPath = path.toRealPath();
             if (!Files.isDirectory(realPath)) {
                 throw new IllegalArgumentException(label + " is not a directory: " + path);
-            }
-            return realPath;
-        } catch (IOException error) {
-            throw new IllegalArgumentException(label + " does not exist: " + path, error);
-        }
-    }
-
-    private static Path requireFile(Path path, String label) {
-        try {
-            Path realPath = path.toRealPath();
-            if (!Files.isRegularFile(realPath)) {
-                throw new IllegalArgumentException(label + " is not a file: " + path);
             }
             return realPath;
         } catch (IOException error) {

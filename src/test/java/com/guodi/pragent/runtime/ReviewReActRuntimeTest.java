@@ -22,14 +22,15 @@ import org.springframework.ai.chat.model.ToolContext;
 
 import com.guodi.pragent.harness.ReviewHarness;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.tool.ToolRoundResult;
 
 class ReviewReActRuntimeTest {
 
     @Test
-    void appendsTextAndToolResultsThenStopsWhenHarnessReturnsPublicationReady() {
+    void appendsTextAndToolResultsThenStopsWhenToolRoundCompletes() {
         ReviewHarness harness = mock(ReviewHarness.class);
         ChatModel model = mock(ChatModel.class);
-        ReviewExecution execution = new ReviewExecution(7L, List.of(new UserMessage("review")),
+        ReviewExecution execution = new ReviewExecution(7L, 11L, List.of(new UserMessage("review")),
                 List.of(), new ToolContext(Map.of()), 0, 10, 1);
         AssistantMessage text = new AssistantMessage("Review complete.");
         AssistantMessage.ToolCall call = new AssistantMessage.ToolCall("publish", "function", "publish_review", "{}");
@@ -37,15 +38,15 @@ class ReviewReActRuntimeTest {
         ToolResponseMessage.ToolResponse response = new ToolResponseMessage.ToolResponse(call.id(), call.name(), "body");
 
         when(harness.aroundRun(eq(7L), any())).thenAnswer(invocation -> {
-            Function<ReviewExecution, ReviewRunResult> next = invocation.getArgument(1);
-            return next.apply(execution);
+            Function<ReviewExecution, AgentRunResult> next = invocation.getArgument(1);
+            assertThat(next.apply(execution).success()).isTrue();
+            return new ReviewRunResult(ReviewStatus.PUBLICATION_READY);
         });
         when(harness.aroundReasoning(eq(execution), any())).thenReturn(
-                new ReviewRunResult(ReviewStatus.RUNNING, new ChatResponse(List.of(new Generation(text)))),
-                new ReviewRunResult(ReviewStatus.RUNNING, new ChatResponse(List.of(new Generation(assistant)))),
-                new ReviewRunResult(ReviewStatus.PUBLICATION_READY, null));
+                new ChatResponse(List.of(new Generation(text))),
+                new ChatResponse(List.of(new Generation(assistant))));
         when(harness.aroundToolRound(execution, assistant))
-                .thenReturn(List.of(new ToolOutcome(call, response, true)));
+                .thenReturn(new ToolRoundResult(List.of(new ToolOutcome(call, response, true)), true));
 
         ReviewRunResult result = new ReviewReActRuntime(harness, model).run(7L);
 

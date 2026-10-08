@@ -104,7 +104,7 @@ class WebhookToReviewHarnessIT {
             ReviewHarness harness = mock(ReviewHarness.class);
             doAnswer(call -> {
                 probe.run(call.getArgument(0));
-                return new ReviewRunResult(ReviewStatus.FAILED, null);
+                return new ReviewRunResult(ReviewStatus.FAILED);
             }).when(harness).aroundRun(anyLong(), any());
             return harness;
         }

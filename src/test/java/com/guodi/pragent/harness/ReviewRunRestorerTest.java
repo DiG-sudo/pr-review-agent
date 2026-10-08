@@ -20,6 +20,7 @@ import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.StoredReviewState;
 import com.guodi.pragent.persistence.toolround.StoredAssistantMessage;
@@ -42,14 +43,17 @@ class ReviewRunRestorerTest {
         Finding finding = new Finding("finding", "high", "bug", "A.java", 1, "Wrong value", null, "open", null);
         ReviewRunEntity task = new ReviewRunEntity();
         task.setId(7L);
-        task.setModelCalls(5);
-        task.setMaxModelCalls(12);
         task.setStatus(ReviewStatus.RUNNING.name());
         task.setThreadId("thread");
-        task.setInitialMessagesJson(json.writeValueAsString(List.of(
+        ReviewAgentEntity agent = new ReviewAgentEntity();
+        agent.setId(9L);
+        agent.setRunId(7L);
+        agent.setModelCalls(5);
+        agent.setMaxModelCalls(12);
+        agent.setInitialMessagesJson(json.writeValueAsString(List.of(
                 Map.of("type", "system", "text", "instructions"),
                 Map.of("type", "user", "text", "review"))));
-        task.setReviewStateJson(json.writeValueAsString(new StoredReviewState(List.of(finding))));
+        agent.setReviewStateJson(json.writeValueAsString(new StoredReviewState(List.of(finding))));
         ToolRoundEntity completed = new ToolRoundEntity();
         completed.setId(11L);
         completed.setRoundNumber(1);
@@ -69,7 +73,9 @@ class ReviewRunRestorerTest {
         }).when(transactions).executeWithoutResult(any());
         ReviewWorkspace prepared = mock(ReviewWorkspace.class);
         when(prepared.workspaceDirectory()).thenReturn(workspace);
-        ReviewExecution execution = new ReviewRunRestorer(rounds, json, transactions).restore(task, prepared);
+        when(prepared.fileDiffs()).thenReturn(List.of());
+        ReviewExecution execution = new ReviewRunRestorer(rounds, json, transactions)
+                .loadExecution(task, agent, prepared);
 
         assertThat(execution.getInitialMessages()).hasSize(2);
         assertThat(execution.getInitialMessages().getFirst().getText()).isEqualTo("instructions");
@@ -80,6 +86,8 @@ class ReviewRunRestorerTest {
         assertThat(execution.getNextToolRoundNumber()).isEqualTo(3);
         assertThat(execution.getModelCalls()).isEqualTo(5);
         assertThat(execution.getMaxModelCalls()).isEqualTo(12);
+        assertThat(execution.getReviewRunId()).isEqualTo(7L);
+        assertThat(execution.getAgentId()).isEqualTo(9L);
         ArgumentCaptor<ToolRoundEntity> update = ArgumentCaptor.forClass(ToolRoundEntity.class);
         verify(rounds).update(update.capture(), any());
         assertThat(update.getValue().getStatus()).isEqualTo("ABANDONED");

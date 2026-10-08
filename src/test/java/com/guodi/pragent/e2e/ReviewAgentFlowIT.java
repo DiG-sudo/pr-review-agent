@@ -34,6 +34,7 @@ import com.guodi.pragent.entry.queue.*;
 import com.guodi.pragent.entry.webhook.*;
 import com.guodi.pragent.harness.*;
 import com.guodi.pragent.persistence.outbox.*;
+import com.guodi.pragent.persistence.reviewagent.*;
 import com.guodi.pragent.persistence.reviewrun.*;
 import com.guodi.pragent.persistence.toolround.*;
 import com.guodi.pragent.preparation.*;
@@ -48,7 +49,9 @@ import com.guodi.pragent.runtime.tool.*;
         "spring.datasource.url=jdbc:mysql://127.0.0.1:3306/pr_review_agent_e2e_test",
         "spring.datasource.username=root", "spring.datasource.password=${PR_REVIEW_DB_ROOT_PASSWORD:root_dev}",
         "spring.data.redis.database=14", "spring.ai.model.chat=none",
-        "GITHUB_WEBHOOK_SECRET=e2e-secret", "pr-review.execution.max-model-calls=20"})
+        "GITHUB_WEBHOOK_SECRET=e2e-secret", "pr-review.execution.max-model-calls=20",
+        "pr-review.planning.grouping-threshold=4", "pr-review.planning.max-agents=4"})
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ReviewAgentFlowIT {
     static final String SOURCE = "services/src/main/java/org/keycloak/authentication/authenticators/browser/AbstractUsernameFormAuthenticator.java";
     static final String STREAM = "pr-review:run:v1", GROUP = "pr-review-workers";
@@ -58,12 +61,16 @@ class ReviewAgentFlowIT {
     @Autowired ReviewHarness harness;
     @MockitoSpyBean(name = "reviewReadExecutor") ExecutorService readExecutor;
     @Autowired ToolRoundMapper rounds;
+    @MockitoSpyBean ReviewAgentMapper agents;
     @MockitoSpyBean OutboxEventMapper outbox;
     @Autowired GitHubWebhookService webhookService;
     @Autowired GitHubWorkspacePreparer preparer;
     @Autowired GitHubReviewLookup lookup;
     @Autowired GitHubReviewPublisher publisher;
     @Autowired ScriptedChatModel model;
+    @MockitoSpyBean ReviewAgentStore agentStore;
+    @MockitoSpyBean ReviewRunRestorer restorer;
+    @Autowired org.springframework.context.ApplicationContext applicationContext;
     @MockitoSpyBean ToolRoundStore store;
     @MockitoSpyBean ReviewReadTools readTools;
     @Autowired ObjectMapper json;
@@ -82,6 +89,7 @@ class ReviewAgentFlowIT {
                     event.prepareForDeferredProcessing(); super.append(event);
                 }
             };
+    final ThreadLocal<String> modelCorrelation = ThreadLocal.withInitial(()->"taskId=unknown agentId=none");
     long started;
     String scenario;
 
@@ -93,6 +101,7 @@ class ReviewAgentFlowIT {
 
     @BeforeEach
     void prepare(TestInfo info) throws Exception {
+        productionLogs.list.clear();
         productionLogs.start();
         ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("com.guodi.pragent")).addAppender(productionLogs);
         scenario = info.getTestMethod().orElseThrow().getName();
@@ -100,7 +109,8 @@ class ReviewAgentFlowIT {
         model.reset();
         reset(preparer, lookup, publisher);
         when(lookup.findPublished(anyString(), anyInt(), anyString(), anyString())).thenAnswer(call -> {
-            event("publication.lookup publicationKey=" + call.getArgument(3) + " found=false");
+            ReviewRunEntity task=runs.selectOne(Wrappers.<ReviewRunEntity>lambdaQuery().eq(ReviewRunEntity::getPublicationKey,call.getArgument(3)));
+            event("publication.lookup taskId="+(task==null?"none":task.getId())+" publicationKey=" + call.getArgument(3) + " found=false");
             return OptionalLong.empty();
         });
         when(publisher.publish(anyString(), anyInt(), anyString(), anyString(), anyString())).thenAnswer(call -> {
@@ -130,36 +140,64 @@ class ReviewAgentFlowIT {
             assertThat(intent.text()).isEqualTo(original.getText());
             assertThat(intent.toolCalls()).containsExactlyElementsOf(original.getToolCalls().stream()
                     .map(t -> new StoredAssistantMessage.StoredToolCall(t.id(), t.type(), t.name(), t.arguments())).toList());
-            assertThat(runs.selectById((Long) call.getArgument(0)).getStatus()).isEqualTo("RUNNING");
-            event("toolRound.opened taskId=%s round=%s roundId=%s".formatted(call.getArgument(0), call.getArgument(1), roundId));
+            ReviewAgentEntity agent = agents.selectById((Long) call.getArgument(0));
+            assertThat(runs.selectById(agent.getRunId()).getStatus()).isEqualTo("RUNNING");
+            event("toolRound.opened taskId=%s agentId=%s round=%s roundId=%s"
+                    .formatted(agent.getRunId(), agent.getId(), call.getArgument(1), roundId));
             return roundId;
         }).when(store).beginRound(anyLong(), anyInt(), any(AssistantMessage.class));
         doAnswer(call -> {
-            call.callRealMethod();
+            boolean completed = (Boolean) call.callRealMethod();
             ToolRoundEntity saved = rounds.selectById((Long) call.getArgument(1));
             assertThat(saved.getStatus()).isEqualTo("COMPLETED");
-            boolean published = saved.getPublicationPayloadJson() != null;
-            assertThat(runs.selectById((Long) call.getArgument(0)).getStatus())
-                    .isEqualTo(published ? "PUBLICATION_READY" : "RUNNING");
-            var state = json.readValue(runs.selectById((Long) call.getArgument(0)).getReviewStateJson(), StoredReviewState.class);
+            ReviewAgentEntity agent = agents.selectById((Long) call.getArgument(0));
+            assertThat(runs.selectById(agent.getRunId()).getStatus()).isEqualTo("RUNNING");
+            assertThat(agent.getSuccess()).isEqualTo(completed ? Boolean.TRUE : null);
+            var state = json.readValue(agent.getReviewStateJson(), StoredReviewState.class);
             assertThat(state.findings()).containsExactlyElementsOf(((ReviewState) call.getArgument(3)).findingsSnapshot());
             var response = json.readValue(saved.getToolResponseJson(), StoredToolResponseMessage.class);
             for (var item : response.responses()) {
-                event("toolCall.completed taskId=%s round=%d toolCallId=%s toolName=%s success=%s".formatted(
-                        call.getArgument(0), saved.getRoundNumber(), item.callId(), item.name(), item.success()));
+                event("toolCall.completed taskId=%s agentId=%s round=%d toolCallId=%s toolName=%s success=%s".formatted(
+                        agent.getRunId(), agent.getId(), saved.getRoundNumber(), item.callId(), item.name(), item.success()));
             }
-            return null;
+            return completed;
         }).when(store).completeRound(anyLong(), anyLong(), anyList(), any(ReviewState.class));
+        doAnswer(c -> {
+            Long runId=c.getArgument(0);
+            try {
+                @SuppressWarnings("unchecked") List<ReviewAgentEntity> created=(List<ReviewAgentEntity>)c.callRealMethod();
+                event("plan.persisted taskId="+runId+" agentCount="+created.size());
+                return created;
+            } catch(RuntimeException error) { event("plan.failed taskId="+runId+" errorType="+error.getClass().getSimpleName());throw error; }
+        }).when(agentStore).createPlan(anyLong(),anyList(),anyInt());
+        doAnswer(c -> {
+            ReviewAgentEntity agent=c.getArgument(1);
+            ReviewExecution execution=(ReviewExecution)c.callRealMethod();
+            event("agent.execution taskId="+agent.getRunId()+" agentId="+agent.getId()+" agentIndex="+agent.getAgentIndex()
+                +" mode="+(execution.getModelCalls()==0?"initialize":"restore")+" modelCalls="+execution.getModelCalls()+" maxModelCalls="+execution.getMaxModelCalls()
+                +" nextRound="+execution.getNextToolRoundNumber()+" findingCount="+execution.getReviewState().findingsSnapshot().size());
+            return execution;
+        }).when(restorer).loadExecution(any(),any(),any());
+        model.afterCall = (response,error) -> {
+            try { event("model.finished "+modelCorrelation.get()+" errorType="+(error==null?"none":error.getClass().getSimpleName())+" validResponse="+(response!=null)); }
+            catch(Exception e) { throw new IllegalStateException(e); }
+        };
         model.beforeCall = prompt -> {
             try {
                 for (Long id : taskIds) {
                     ReviewRunEntity task = runs.selectById(id);
-                    if (!prompt.getInstructions().get(1).getText().contains(task.getHeadSha())) continue;
+                    if (task == null || !prompt.getInstructions().get(1).getText().contains(task.getHeadSha())) continue;
+                    var active=agentsFor(id).stream().filter(a->readInitialUser(a).equals(prompt.getInstructions().get(1).getText())).findFirst().orElse(null);
+                    modelCorrelation.set("taskId="+id+" agentId="+(active==null?"none":active.getId())+" agentBudget="+(active==null?0:active.getModelCalls()));
                     String event = "modelCall=%d taskId=%d status=%s persistedBudget=%d storedRounds=%d promptMessages=%d\n"
-                            .formatted(model.prompts.size(), id, task.getStatus(), task.getModelCalls(),
+                            .formatted(model.prompts.size(), id, task.getStatus(), agentsFor(id).stream().mapToInt(ReviewAgentEntity::getModelCalls).sum(),
                                     history(id).size(), prompt.getInstructions().size());
                     event(event.strip());
                 }
+                if(ScriptedChatModel.isPlanning(prompt) && !taskIds.isEmpty()) modelCorrelation.set("taskId="+taskIds.getLast()+" agentId=none");
+                String promptText=prompt.getInstructions().stream().map(Message::getText).reduce("",(a,b)->a+b);
+                String digest=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(promptText.getBytes(StandardCharsets.UTF_8)));
+                event("model.started "+modelCorrelation.get()+" promptChars="+promptText.length()+" promptSha256="+digest+" kind="+(ScriptedChatModel.isPlanning(prompt)?"plan":"review")+" promptMessages="+prompt.getInstructions().size());
             } catch (Exception error) { throw new IllegalStateException(error); }
         };
         // Dedicated DB 14 keys only; never FLUSHDB and never touch production DB 0.
@@ -190,7 +228,16 @@ class ReviewAgentFlowIT {
         var parser = GitHubWorkspacePreparer.class.getDeclaredMethod("parseFileDiffs", Path.class);
         parser.setAccessible(true);
         return constructor.newInstance(temp, temp.resolve("source"), temp.resolve("diff.patch"),
-                parser.invoke(null, temp.resolve("diff.patch")));
+                ((List<GitHubWorkspacePreparer.FileDiff>) parser.invoke(null, temp.resolve("diff.patch"))).stream().filter(f -> f.path().equals(SOURCE)).toList());
+    }
+
+    @AfterAll void attestOfflineModelBoundary() throws Exception {
+        int realBeans=applicationContext.getBeansOfType(ChatModel.class).values().stream().mapToInt(bean -> bean instanceof ScriptedChatModel ? 0 : 1).sum();
+        Files.writeString(Path.of("target/e2e-logs/offline-model.json"),json.writeValueAsString(Map.of(
+                "realLlmRequests",0,"realChatModelBeans",realBeans,
+                "plannerCalls",ScriptedChatModel.totalPlannerCalls.get(),"reviewCalls",ScriptedChatModel.totalReviewCalls.get(),
+                "evidence","Only scripted ChatModel; OpenAI auto-configurations excluded; no model transport exists")));
+        assertThat(realBeans).isZero();
     }
 
     @AfterEach
@@ -208,8 +255,8 @@ class ReviewAgentFlowIT {
         for (Long id : taskIds) {
             ReviewRunEntity task = runs.selectById(id);
             List<ToolRoundEntity> history = history(id);
-            report.append("taskId=%s status=%s modelCalls=%s maxModelCalls=%s rounds=%d externalReviewId=%s\n"
-                    .formatted(id, task.getStatus(), task.getModelCalls(), task.getMaxModelCalls(), history.size(), task.getExternalReviewId()));
+            report.append("taskId=%s status=%s rounds=%d externalReviewId=%s\n".formatted(id, task.getStatus(), history.size(), task.getExternalReviewId()));
+            for (var agent : agentsFor(id)) report.append("agentId=%s index=%s success=%s modelCalls=%s maxModelCalls=%s\n".formatted(agent.getId(), agent.getAgentIndex(), agent.getSuccess(), agent.getModelCalls(), agent.getMaxModelCalls()));
             if (task.getReviewStateJson() != null) report.append("findingCount=%d\n".formatted(
                     json.readValue(task.getReviewStateJson(), StoredReviewState.class).findings().size()));
             if (task.getPublicationPayloadJson() != null) {
@@ -231,10 +278,12 @@ class ReviewAgentFlowIT {
             }
         }
         report.append("pendingMessages=%d\n".formatted(Boolean.TRUE.equals(redis.hasKey(STREAM)) ? pendingCount() : 0));
+        for(Long id:taskIds) { var task=runs.selectById(id);event("task.snapshot taskId="+id+" status="+task.getStatus()+" publicationRequests="+mockingDetails(publisher).getInvocations().size()); }
+        event("stream.snapshot pending="+(Boolean.TRUE.equals(redis.hasKey(STREAM))?pendingCount():0)+" taskCount="+taskIds.size());
         report.append("modelRequests=%d publicationRequests=%d durationMs=%d\n".formatted(model.prompts.size(),
                 mockingDetails(publisher).getInvocations().size(), Duration.ofNanos(System.nanoTime() - started).toMillis()));
         for (Path path : workspaces) {
-            event("workspace.closed workspace=" + path.getFileName() + " deleted=" + !Files.exists(path));
+            event("workspace.closed workspace=" + path.getFileName() + " deleted=" + !Files.exists(path)+" activeWorkers="+reviewWorkerExecutor.getActiveCount());
         }
         Path logs = Path.of("target/e2e-logs");
         Files.createDirectories(logs);
@@ -257,12 +306,17 @@ class ReviewAgentFlowIT {
         await(() -> reviewWorkerExecutor.getActiveCount() == 0 && reviewWorkerExecutor.getQueue().isEmpty());
         if (readExecutor instanceof ThreadPoolExecutor pool) await(() -> pool.getActiveCount() == 0 && pool.getQueue().isEmpty());
         for (Long id : taskIds) {
-            rounds.delete(Wrappers.<ToolRoundEntity>lambdaQuery().eq(ToolRoundEntity::getRunId, id));
+            List<Long> agentIds = agentsFor(id).stream().map(ReviewAgentEntity::getId).toList();
+            if (!agentIds.isEmpty()) {
+                rounds.delete(Wrappers.<ToolRoundEntity>lambdaQuery().in(ToolRoundEntity::getAgentId, agentIds));
+            }
+            agents.delete(Wrappers.<ReviewAgentEntity>lambdaQuery().eq(ReviewAgentEntity::getRunId, id));
             outbox.delete(Wrappers.<OutboxEventEntity>lambdaQuery().eq(OutboxEventEntity::getRunId, id));
             runs.deleteById(id);
         }
         redis.delete(STREAM);
         for (Path path : workspaces) org.springframework.util.FileSystemUtils.deleteRecursively(path);
+        taskIds.clear(); workspaces.clear(); taskWorkspaces.clear();
     }
 
     private ReviewRunEntity task(String status) {
@@ -274,15 +328,32 @@ class ReviewAgentFlowIT {
         task.setBaseSha("b".repeat(40));
         task.setPublicationKey(UUID.randomUUID().toString());
         task.setStatus(status);
-        task.setModelCalls(0);
         runs.insert(task);
         taskIds.add(task.getId());
         return task;
     }
 
     private List<ToolRoundEntity> history(Long id) {
-        return rounds.selectList(Wrappers.<ToolRoundEntity>lambdaQuery().eq(ToolRoundEntity::getRunId, id)
-                .orderByAsc(ToolRoundEntity::getRoundNumber));
+        List<Long> agentIds = agentsFor(id).stream().map(ReviewAgentEntity::getId).toList();
+        if (agentIds.isEmpty()) return List.of();
+        return rounds.selectList(Wrappers.<ToolRoundEntity>lambdaQuery().in(ToolRoundEntity::getAgentId, agentIds)
+                .orderByAsc(ToolRoundEntity::getAgentId, ToolRoundEntity::getRoundNumber));
+    }
+    private List<ReviewAgentEntity> agentsFor(Long runId) {
+        return agents.selectList(Wrappers.<ReviewAgentEntity>lambdaQuery()
+                .eq(ReviewAgentEntity::getRunId, runId)
+                .orderByAsc(ReviewAgentEntity::getAgentIndex));
+    }
+    private ReviewAgentEntity onlyAgent(Long runId) {
+        assertThat(agentsFor(runId)).hasSize(1);
+        return agentsFor(runId).getFirst();
+    }
+    private StoredReviewState agentState(Long runId) {
+        try {
+            return json.readValue(onlyAgent(runId).getReviewStateJson(), StoredReviewState.class);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
     private static AssistantMessage.ToolCall tool(String id, String name, String arguments) {
         return new AssistantMessage.ToolCall(id, "function", name, arguments);
@@ -315,10 +386,11 @@ class ReviewAgentFlowIT {
             for (Long id : taskIds) {
                 assertThat(history(id)).isEmpty();
                 var initialized = runs.selectById(id);
-                assertThat(initialized.getInitialMessagesJson()).isNotBlank();
-                assertThat(initialized.getReviewStateJson()).isNotBlank();
-                assertThat(initialized.getModelCalls()).isEqualTo(2);
-                assertThat(initialized.getMaxModelCalls()).isEqualTo(20);
+                var initializedAgent = onlyAgent(id);
+                assertThat(initializedAgent.getInitialMessagesJson()).isNotBlank();
+                assertThat(initializedAgent.getReviewStateJson()).isNotBlank();
+                assertThat(onlyAgent(initialized.getId()).getModelCalls()).isEqualTo(2);
+                assertThat(onlyAgent(initialized.getId()).getMaxModelCalls()).isEqualTo(20);
             }
             assertThat(prompt.getInstructions()).anyMatch(message -> message.getText() != null && message.getText().contains("请继续审查"));
             return response(tool("diff", "get_diff", "{}"), tool("read", "read_file", fileArgs),
@@ -357,8 +429,8 @@ class ReviewAgentFlowIT {
     private void assertPublished(Long id, int calls, int count) throws Exception {
         ReviewRunEntity task = runs.selectById(id);
         assertThat(task.getStatus()).isEqualTo("PUBLISHED");
-        assertThat(task.getModelCalls()).isEqualTo(calls);
-        assertThat(task.getMaxModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(calls);
+        assertThat(onlyAgent(task.getId()).getMaxModelCalls()).isEqualTo(20);
         assertThat(task.getExternalReviewId()).isEqualTo("4242");
         List<ToolRoundEntity> history = history(id);
         assertThat(history).hasSize(count);
@@ -374,7 +446,10 @@ class ReviewAgentFlowIT {
                 assertThat(result.responses().get(n).name()).isEqualTo(intent.toolCalls().get(n).name());
             }
         }
-        assertThat(task.getPublicationPayloadJson()).isEqualTo(history.getLast().getPublicationPayloadJson());
+        var finalResponse = json.readValue(history.getLast().getToolResponseJson(), StoredToolResponseMessage.class);
+        assertThat(finalResponse.responses()).hasSize(1);
+        assertThat(finalResponse.responses().getFirst().content())
+                .isEqualTo(json.readTree(task.getPublicationPayloadJson()).get("body").asText());
         assertThat(workspaces).isNotEmpty().allMatch(path -> !Files.exists(path));
         verify(publisher, times(1)).publish(eq(task.getRepository()), eq(task.getPullRequestNumber()), eq(task.getHeadSha()),
                 eq(task.getPublicationKey()), eq(json.readTree(task.getPublicationPayloadJson()).get("body").asText()));
@@ -412,7 +487,7 @@ class ReviewAgentFlowIT {
         model.steps.add(p -> {
             assertThat(history(task.getId())).isEmpty();
             assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(2);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(2);
             assertThat(p.getInstructions()).anyMatch(m -> "Inspecting PR.".equals(m.getText()));
             assertThat(p.getInstructions()).anyMatch(m -> m instanceof UserMessage && m.getText().contains("请继续审查"));
             return response(tool("publish", "publish_review", "{}"));
@@ -429,8 +504,7 @@ class ReviewAgentFlowIT {
                 .containsExactly("read-again", "mixed-1", "mixed-2");
         var results = json.readValue(mixed.getToolResponseJson(), StoredToolResponseMessage.class);
         assertThat(results.responses()).extracting(StoredToolResponseMessage.StoredToolResult::success).containsExactly(true, false, false);
-        assertThat(mixed.getPublicationPayloadJson()).isNull();
-        assertThat(history(task.getId()).subList(0, 5)).allMatch(r -> r.getPublicationPayloadJson() == null);
+        assertThat(onlyAgent(task.getId()).getSuccess()).isTrue();
     }
 
     @Test void writeThenListSeesNewAndUpdatedFindingInSameRound() throws Exception {
@@ -442,7 +516,7 @@ class ReviewAgentFlowIT {
             assertThat(lastResults(p)).extracting(ToolResponseMessage.ToolResponse::id).containsExactly("add", "list-added");
             assertThat(lastResults(p).getLast().responseData()).contains("Original finding");
             try {
-                var finding = json.readValue(runs.selectById(task.getId()).getReviewStateJson(), StoredReviewState.class).findings().getFirst();
+                var finding = agentState(task.getId()).findings().getFirst();
                 ids.add(finding.id());
                 return response(tool("update", "update_finding", "{\"id\":\"" + finding.id() + "\",\"description\":\"Revised finding\"}"),
                         tool("list-updated", "list_findings", "{}"));
@@ -523,11 +597,11 @@ class ReviewAgentFlowIT {
         model.steps.add(prompt -> response(tool("read", "get_diff", "{}")));
         model.steps.add(prompt -> { throw new IllegalStateException("scripted outage"); });
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("scripted outage");
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(2);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(2);
         assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
         ToolRoundEntity interrupted = new ToolRoundEntity();
-        interrupted.setRunId(task.getId());
+        interrupted.setAgentId(onlyAgent(task.getId()).getId());
         interrupted.setRoundNumber(2);
         interrupted.setStatus("OPEN");
         interrupted.setAssistantMessageJson("{\"text\":\"\",\"toolCalls\":[{\"id\":\"not-replayed\",\"type\":\"function\",\"name\":\"add_finding\",\"arguments\":\"{}\"}]}");
@@ -539,8 +613,8 @@ class ReviewAgentFlowIT {
         runtime.run(task.getId());
         ReviewRunEntity saved = runs.selectById(task.getId());
         assertThat(saved.getStatus()).isEqualTo("PUBLISHED");
-        assertThat(saved.getModelCalls()).isEqualTo(3);
-        assertThat(saved.getMaxModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(3);
+        assertThat(onlyAgent(saved.getId()).getMaxModelCalls()).isEqualTo(20);
         assertThat(saved.getExternalReviewId()).isEqualTo("4242");
         assertThat(history(task.getId())).extracting(ToolRoundEntity::getStatus)
                 .containsExactly("COMPLETED", "ABANDONED", "COMPLETED");
@@ -573,7 +647,7 @@ class ReviewAgentFlowIT {
         assertThat(history(task.getId())).hasSize(1);
         assertThat(history(task.getId()).getFirst().getStatus()).isEqualTo("OPEN");
         assertThat(history(task.getId()).getFirst().getToolResponseJson()).isNull();
-        assertThat(json.readValue(runs.selectById(task.getId()).getReviewStateJson(), StoredReviewState.class).findings()).isEmpty();
+        assertThat(agentState(task.getId()).findings()).isEmpty();
         assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
         verifyNoInteractions(publisher);
@@ -584,7 +658,7 @@ class ReviewAgentFlowIT {
         model.steps.add(prompt -> null);
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("模型没有返回有效响应");
         assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
         assertThat(history(task.getId())).isEmpty();
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
         verifyNoInteractions(publisher);
@@ -598,7 +672,7 @@ class ReviewAgentFlowIT {
         assertThat(runtime.run(task.getId()).status()).isEqualTo(ReviewStatus.FAILED);
         ReviewRunEntity saved = runs.selectById(task.getId());
         assertThat(saved.getStatus()).isEqualTo("FAILED");
-        assertThat(saved.getModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(20);
         assertThat(saved.getFinalResultJson()).contains("budget exhausted");
         assertThat(history(task.getId())).isEmpty();
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
@@ -697,7 +771,7 @@ class ReviewAgentFlowIT {
         enqueue(task);
         await(() -> "FAILED".equals(runs.selectById(task.getId()).getStatus())
                 && reviewWorkerExecutor.getActiveCount() == 0 && pendingCount() == 0);
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(20);
         verifyNoInteractions(publisher);
     }
 
@@ -845,7 +919,7 @@ class ReviewAgentFlowIT {
         model.steps.add(prompt -> new ChatResponse(List.of()));
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("模型没有返回有效响应");
         assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
     }
 
@@ -887,7 +961,7 @@ class ReviewAgentFlowIT {
         model.steps.add(prompt -> broken);
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("模型没有返回有效响应");
         assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
         assertThat(workspaces).allMatch(path -> !Files.exists(path));
     }
 
@@ -916,9 +990,9 @@ class ReviewAgentFlowIT {
         model.steps.add(p -> response(tool("read-before", "get_diff", "{}")));
         model.steps.add(p -> { throw new IllegalStateException("stop after completed rounds"); });
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("stop after completed rounds");
-        var before = runs.selectById(task.getId());
+        var before = onlyAgent(task.getId());
         String initial = before.getInitialMessagesJson(), snapshot = before.getReviewStateJson();
-        store.beginRound(task.getId(), 3, response(tool("never-replay", "add_finding", finding)).getResult().getOutput());
+        store.beginRound(before.getId(), 3, response(tool("never-replay", "add_finding", finding)).getResult().getOutput());
         clearInvocations(readTools);
         model.steps.add(p -> {
             var calls = p.getInstructions().stream().filter(AssistantMessage.class::isInstance)
@@ -934,10 +1008,11 @@ class ReviewAgentFlowIT {
         runtime.run(task.getId());
         var saved = runs.selectById(task.getId());
         assertThat(saved.getStatus()).isEqualTo("PUBLISHED");
-        assertThat(saved.getModelCalls()).isEqualTo(5);
-        assertThat(saved.getMaxModelCalls()).isEqualTo(20);
-        assertThat(saved.getInitialMessagesJson()).isEqualTo(initial);
-        assertThat(saved.getReviewStateJson()).isEqualTo(snapshot);
+        assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(5);
+        assertThat(onlyAgent(saved.getId()).getMaxModelCalls()).isEqualTo(20);
+        var savedAgent = onlyAgent(task.getId());
+        assertThat(savedAgent.getInitialMessagesJson()).isEqualTo(initial);
+        assertThat(savedAgent.getReviewStateJson()).isEqualTo(snapshot);
         assertThat(history(task.getId())).extracting(ToolRoundEntity::getStatus)
                 .containsExactly("COMPLETED", "COMPLETED", "ABANDONED", "COMPLETED", "COMPLETED");
         assertThat(history(task.getId())).extracting(ToolRoundEntity::getRoundNumber).containsExactly(1,2,3,4,5);
@@ -957,7 +1032,7 @@ class ReviewAgentFlowIT {
             assertThatThrownBy(() -> runtime.run(task.getId())).hasMessageContaining("任务状态不允许推理");
             assertThat(model.prompts).hasSize(before + 1);
             assertThat(history(task.getId())).isEmpty();
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
         }
         verifyNoInteractions(readTools, publisher);
     }
@@ -967,8 +1042,8 @@ class ReviewAgentFlowIT {
         assertThat(pendingCount()).isEqualTo(1);
         var saved = runs.selectById(id);
         assertThat(saved.getStatus()).isEqualTo(state);
-        assertThat(saved.getModelCalls()).isEqualTo(budget);
-        assertThat(saved.getMaxModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(budget);
+        assertThat(onlyAgent(saved.getId()).getMaxModelCalls()).isEqualTo(20);
         assertThat(workspaces).allMatch(p -> !Files.exists(p));
     }
 
@@ -1046,8 +1121,8 @@ class ReviewAgentFlowIT {
                 var task = task("RUNNING"); task.setPullRequestNumber(staleBase ? 1 : 2); task.setThreadId("github:e2e/repo#" + task.getPullRequestNumber());
                 task.setBaseSha(staleBase ? "0".repeat(40) : base); task.setHeadSha(staleBase ? head : "0".repeat(40)); runs.updateById(task);
                 assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("cannot prepare PR workspace");
-                assertThat(runs.selectById(task.getId()).getModelCalls()).isZero();
-                assertThat(runs.selectById(task.getId()).getInitialMessagesJson()).isNull();
+                assertThat(agentsFor(task.getId())).isEmpty();
+                assertThat(agentsFor(task.getId())).isEmpty();
                 assertThat(model.prompts).isEmpty();
             }
             var task = task("RUNNING"); task.setPullRequestNumber(3); task.setThreadId("github:e2e/repo#3"); task.setBaseSha(base); task.setHeadSha(head); runs.updateById(task);
@@ -1130,11 +1205,13 @@ class ReviewAgentFlowIT {
     @Test void isolatedEnvironmentAndRealCorePreflight() throws Exception {
         try (var connection = sql.getSqlSessionFactory().getConfiguration().getEnvironment().getDataSource().getConnection()) {
             assertThat(connection.getCatalog()).isEqualTo("pr_review_agent_e2e_test");
-            for (String table : List.of("review_run", "tool_round", "outbox_event")) {
+            for (String table : List.of("review_run", "review_agent", "tool_round", "outbox_event")) {
                 try (var columns = connection.getMetaData().getColumns(connection.getCatalog(), null, table, null)) {
                     Set<String> names = new HashSet<>(); while (columns.next()) names.add(columns.getString("COLUMN_NAME"));
-                    assertThat(names).contains("id", "status");
-                    if (table.equals("review_run")) assertThat(names).contains("initial_messages_json", "review_state_json", "model_calls", "max_model_calls", "publication_payload_json");
+                    assertThat(names).contains("id");
+                    if (!table.equals("review_agent")) assertThat(names).contains("status");
+                    if (table.equals("review_run")) assertThat(names).contains("review_state_json", "publication_payload_json").doesNotContain("model_calls", "initial_messages_json");
+                    if (table.equals("review_agent")) assertThat(names).contains("initial_messages_json", "review_state_json", "model_calls", "max_model_calls", "success");
                     if (table.equals("tool_round")) assertThat(names).contains("round_number", "assistant_message_json", "tool_response_json");
                 }
             }
@@ -1260,15 +1337,15 @@ class ReviewAgentFlowIT {
         runtime.run(task.getId()); assertPublished(task.getId(), 2, 2);
         var stored = json.readValue(history(task.getId()).getFirst().getToolResponseJson(), StoredToolResponseMessage.class);
         assertThat(stored.responses()).extracting(StoredToolResponseMessage.StoredToolResult::callId).containsExactly("read-1", "read-2", "read-3");
-        assertThat(json.readValue(runs.selectById(task.getId()).getReviewStateJson(), StoredReviewState.class).findings()).isEmpty();
+        assertThat(agentState(task.getId()).findings()).isEmpty();
     }
 
     @Test void initializationFailurePreventsModelAndCleansWorkspace() {
         var task = task("RUNNING");
-        doThrow(new IllegalStateException("initialization failed")).when(runs).updateById(any(ReviewRunEntity.class));
+        doThrow(new IllegalStateException("initialization failed")).when(agents).insert(any(ReviewAgentEntity.class));
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("initialization failed");
         assertThat(model.prompts).isEmpty(); assertThat(history(task.getId())).isEmpty();
-        assertThat(runs.selectById(task.getId()).getInitialMessagesJson()).isNull();
+        assertThat(agentsFor(task.getId())).isEmpty();
         assertThat(workspaces).allMatch(p -> !Files.exists(p));
     }
 
@@ -1282,7 +1359,7 @@ class ReviewAgentFlowIT {
             await(() -> model.prompts.size() == (completing ? 3 : 1) && reviewWorkerExecutor.getActiveCount() == 0);
             assertThat(pendingCount()).isEqualTo(completing ? 2 : 1);
             assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
             if (completing) {
                 assertThat(history(task.getId())).extracting(ToolRoundEntity::getStatus).containsExactly("OPEN");
                 assertThat(history(task.getId()).getFirst().getToolResponseJson()).isNull();
@@ -1291,7 +1368,7 @@ class ReviewAgentFlowIT {
             doAnswer(c -> c.callRealMethod()).when(store).beginRound(anyLong(), anyInt(), any());
             doAnswer(c -> c.callRealMethod()).when(store).completeRound(anyLong(), anyLong(), anyList(), any());
             model.steps.add(p -> response(tool("publish", "publish_review", "{}"))); runtime.run(task.getId());
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(2);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(2);
             assertThat(pendingCount()).isEqualTo(completing ? 2 : 1);
             event("explicit.restore taskId=" + task.getId() + " originalEntry=" + entry + " ack=false");
         }
@@ -1305,7 +1382,7 @@ class ReviewAgentFlowIT {
             await(() -> model.prompts.size() == count && reviewWorkerExecutor.getActiveCount() == 0);
             assertThat(pendingCount()).isEqualTo(expected);
             assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(1);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(1);
             assertThat(history(task.getId())).isEmpty();
         }
         assertThat(workspaces).allMatch(p -> !Files.exists(p)); verifyNoInteractions(publisher);
@@ -1339,11 +1416,11 @@ class ReviewAgentFlowIT {
         for (int i = 1; i <= 3; i++) {
             model.steps.add(p -> { throw new IllegalStateException("outage"); });
             assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("outage");
-            assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(i);
+            assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(i);
         }
         for (int i = 3; i < 20; i++) model.steps.add(p -> new ChatResponse(List.of(new Generation(new AssistantMessage("Continue")))));
         assertThat(runtime.run(task.getId()).status()).isEqualTo(ReviewStatus.FAILED);
-        assertThat(runs.selectById(task.getId()).getModelCalls()).isEqualTo(20);
+        assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(20);
         assertThat(model.prompts).hasSize(20); verifyNoInteractions(publisher);
     }
 
@@ -1356,7 +1433,7 @@ class ReviewAgentFlowIT {
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("stop for snapshot");
         var result = json.readValue(history(task.getId()).getFirst().getToolResponseJson(), StoredToolResponseMessage.class);
         assertThat(result.responses().getFirst().success()).as("Finding outside changed lines must be rejected").isFalse();
-        assertThat(json.readValue(runs.selectById(task.getId()).getReviewStateJson(), StoredReviewState.class).findings()).isEmpty();
+        assertThat(agentState(task.getId()).findings()).isEmpty();
     }
     private String argsUnchecked(String file, int line, String description) {
         try { return args(Map.of("severity", "high", "category", "test", "file", file, "startLine", line, "description", description)); }
@@ -1367,7 +1444,7 @@ class ReviewAgentFlowIT {
         model.steps.add(p -> response(tool("add-1", "add_finding", arguments), tool("add-2", "add_finding", arguments)));
         model.steps.add(p -> { throw new IllegalStateException("stop for snapshot"); });
         assertThatThrownBy(() -> runtime.run(task.getId())).hasMessage("stop for snapshot");
-        assertThat(json.readValue(runs.selectById(task.getId()).getReviewStateJson(), StoredReviewState.class).findings().size())
+        assertThat(agentState(task.getId()).findings().size())
                 .as("Identical issue must have one Finding (contents omitted from log)").isEqualTo(1);
     }
 
@@ -1432,7 +1509,7 @@ class ReviewAgentFlowIT {
             assertThat(findings).hasSize(1);
             assertThat(findings.getFirst().description()).isEqualTo("issue for " + task.getHeadSha());
             assertThat(history(task.getId())).extracting(ToolRoundEntity::getRoundNumber).containsExactly(1, 2);
-            assertThat(saved.getModelCalls()).isEqualTo(2);
+            assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(2);
             verify(publisher, times(1)).publish(eq(task.getRepository()), eq(task.getPullRequestNumber()), eq(task.getHeadSha()), eq(task.getPublicationKey()), contains(task.getHeadSha()));
         }
         assertThat(taskWorkspaces.get(shaA)).isNotEqualTo(taskWorkspaces.get(shaB));
@@ -1476,8 +1553,10 @@ class ReviewAgentFlowIT {
         var task = task("RUNNING");
         model.steps.add(p -> {
             var saved = runs.selectById(task.getId());
-            assertThat(saved.getInitialMessagesJson()).isNotBlank(); assertThat(saved.getReviewStateJson()).isNotBlank();
-            assertThat(saved.getModelCalls()).isEqualTo(1); assertThat(saved.getMaxModelCalls()).isEqualTo(20);
+            var savedAgent = onlyAgent(task.getId());
+            assertThat(savedAgent.getInitialMessagesJson()).isNotBlank();
+            assertThat(savedAgent.getReviewStateJson()).isNotBlank();
+            assertThat(onlyAgent(saved.getId()).getModelCalls()).isEqualTo(1); assertThat(onlyAgent(saved.getId()).getMaxModelCalls()).isEqualTo(20);
             assertThat(p.getInstructions().get(1).getText()).contains(task.getHeadSha(), task.getBaseSha(), task.getRepository());
             var options = (org.springframework.ai.model.tool.ToolCallingChatOptions) p.getOptions();
             assertThat(options.getInternalToolExecutionEnabled()).isFalse();
@@ -1506,7 +1585,10 @@ class ReviewAgentFlowIT {
             boolean leaked = model.prompts.stream().flatMap(p -> p.getInstructions().stream()).anyMatch(m -> m.getText() != null && m.getText().contains(sentinel));
             assertThat(leaked).as("Evaluator sentinel absent from all model instructions").isFalse();
             var saved = runs.selectById(task.getId());
-            assertThat((saved.getInitialMessagesJson() + saved.getReviewStateJson() + saved.getPublicationPayloadJson()).contains(sentinel)).isFalse();
+            String agentData = agentsFor(task.getId()).stream()
+                    .map(agent -> agent.getInitialMessagesJson() + agent.getReviewStateJson())
+                    .reduce("", String::concat);
+            assertThat((agentData + saved.getReviewStateJson() + saved.getPublicationPayloadJson()).contains(sentinel)).isFalse();
             for (var round : history(task.getId())) assertThat((round.getAssistantMessageJson() + round.getToolResponseJson()).contains(sentinel)).isFalse();
             assertThat(Files.readString(Path.of("target/e2e-logs/intermediate.log")).contains(sentinel)).isFalse();
             assertThat(productionLogs.list.stream().anyMatch(e -> e.getFormattedMessage().contains(sentinel))).isFalse();
@@ -1546,6 +1628,342 @@ class ReviewAgentFlowIT {
         }); runtime.run(task.getId());
     }
 
+    private GitHubWorkspacePreparer.ReviewWorkspace syntheticWorkspace(int count) throws Exception {
+        Path root = Files.createTempDirectory("agent-groups-"); workspaces.add(root);
+        Path source = Files.createDirectories(root.resolve("source"));
+        StringBuilder patch = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            String file = "File" + i + ".java";
+            Files.writeString(source.resolve(file), "class File" + i + " {}\n");
+            patch.append("diff --git a/" + file + " b/" + file + "\n--- a/" + file + "\n+++ b/" + file + "\n@@ -1 +1 @@\n-old\n+class File" + i + " {}\n");
+        }
+        Files.writeString(root.resolve("diff.patch"), patch);
+        var parser = GitHubWorkspacePreparer.class.getDeclaredMethod("parseFileDiffs", Path.class); parser.setAccessible(true);
+        var ctor = GitHubWorkspacePreparer.ReviewWorkspace.class.getDeclaredConstructor(Path.class, Path.class, Path.class, List.class); ctor.setAccessible(true);
+        return ctor.newInstance(root, source, root.resolve("diff.patch"), parser.invoke(null, root.resolve("diff.patch")));
+    }
+    private void useSynthetic(int count) {
+        doAnswer(c -> {
+            var workspace = syntheticWorkspace(count);
+            taskWorkspaces.put(((ReviewRequest)c.getArgument(0)).headSha(), workspace.workspaceDirectory());
+            return workspace;
+        }).when(preparer).prepareWorkspace(any());
+    }
+    private ChatResponse textResponse(String text) { return new ChatResponse(List.of(new Generation(new AssistantMessage(text)))); }
+    private String planJson(int count, int groups) throws Exception {
+        List<Map<String,Object>> list = new ArrayList<>();
+        for (int g=0; g<groups; g++) {
+            List<String> files = new ArrayList<>();
+            for (int i=g; i<count; i+=groups) files.add("File"+i+".java");
+            list.add(Map.of("files", files));
+        }
+        return json.writeValueAsString(Map.of("groups",list));
+    }
+    private int currentIndex(Prompt prompt, Long runId) {
+        String initial = prompt.getInstructions().get(1).getText();
+        return agentsFor(runId).stream().filter(a -> initial.equals(readInitialUser(a))).findFirst().orElseThrow().getAgentIndex();
+    }
+    private String readInitialUser(ReviewAgentEntity agent) {
+        try { return json.readTree(agent.getInitialMessagesJson()).get(1).get("text").asText(); }
+        catch(Exception e) { throw new IllegalStateException(e); }
+    }
+
+    @Test void planningThresholdUsesNoPlannerForOneAndFourFiles() throws Exception {
+        for (int count : List.of(1,4)) {
+            useSynthetic(count); var task=task("RUNNING");
+            model.routed=p -> { assertThat(ScriptedChatModel.isPlanning(p)).isFalse(); return response(tool("finish", "publish_review", "{}")); };
+            runtime.run(task.getId());
+            assertThat(agentsFor(task.getId())).hasSize(1);
+            assertThat(json.readTree(onlyAgent(task.getId()).getFilePathsJson())).hasSize(count);
+        }
+        assertThat(model.plannerCalls.get()).isZero(); assertThat(model.reviewCalls.get()).isEqualTo(2);
+    }
+    @Test void largePlansCoverEveryFileOnceWithAtMostFourAgents() throws Exception {
+        int expectedCalls=0;
+        for (int count : List.of(5,9,20)) {
+            int groups=count==5?2:count==9?3:4;
+            useSynthetic(count); var task=task("RUNNING"); String plan=planJson(count,groups);
+            model.routed=p -> ScriptedChatModel.isPlanning(p)?textResponse(plan):response(tool("finish", "publish_review", "{}"));
+            runtime.run(task.getId()); expectedCalls+=groups;
+            var planRows=agentsFor(task.getId()); assertThat(planRows).hasSize(groups);
+            List<String> files=new ArrayList<>();
+            for(var a:planRows) files.addAll(json.readerForListOf(String.class).<List<String>>readValue(a.getFilePathsJson()));
+            assertThat(files).hasSize(count).doesNotHaveDuplicates();
+            for(int i=0;i<count;i++) assertThat(files).contains("File"+i+".java");
+        }
+        assertThat(model.plannerCalls.get()).isEqualTo(3); assertThat(model.reviewCalls.get()).isEqualTo(expectedCalls);
+    }
+    @Test void invalidPlansLeaveNoAgentsAndDoNotStartReviewer() throws Exception {
+        useSynthetic(5);
+        for (String invalid : List.of("not-json", "null", "{\"groups\":[]}", "{\"groups\":[{\"files\":[]},{\"files\":[\"File0.java\"]}]}",
+                "{\"groups\":[{\"files\":[\"File0.java\"]},{\"files\":[\"File0.java\"]}]}",
+                "{\"groups\":[{\"files\":[\"File0.java\"]},{\"files\":[\"unknown.java\"]}]}",
+                "{\"groups\":[{\"files\":[\"File0.java\"]},{\"files\":[\"File1.java\"]}]}",planJson(5,1),planJson(5,5))) {
+            var task=task("RUNNING"); model.routed=p -> textResponse(invalid);
+            assertThatThrownBy(()->runtime.run(task.getId())).isInstanceOf(IllegalStateException.class);
+            assertThat(agentsFor(task.getId())).isEmpty(); assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+        }
+        assertThat(model.reviewCalls.get()).isZero(); verifyNoInteractions(publisher);
+    }
+    @Test void planInsertionFailureRollsBackEveryAgent() throws Exception {
+        useSynthetic(5); var task=task("RUNNING"); String plan=planJson(5,2);
+        model.routed=p -> textResponse(plan);
+        java.util.concurrent.atomic.AtomicInteger writes=new java.util.concurrent.atomic.AtomicInteger();
+        doAnswer(c -> { var r=sql.insert("com.guodi.pragent.persistence.reviewagent.ReviewAgentMapper.insert", c.getArgument(0)); if(writes.incrementAndGet()==2) throw new IllegalStateException("plan SQL failure"); return r; }).when(agents).insert(any(ReviewAgentEntity.class));
+        assertThatThrownBy(()->runtime.run(task.getId())).hasMessage("plan SQL failure");
+        assertThat(agentsFor(task.getId())).isEmpty(); assertThat(model.reviewCalls.get()).isZero();
+    }
+    @Test void multiAgentSerialScopesBudgetsAndPublicationAreIndependent() throws Exception {
+        useSynthetic(5); var task=task("RUNNING"); String plan=planJson(5,2);
+        List<Integer> order=new ArrayList<>();
+        Map<Integer,Integer> steps=new HashMap<>();
+        model.routed=p -> {
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int index=currentIndex(p,task.getId()); order.add(index);
+            assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+            assertThat(runs.selectById(task.getId()).getPublicationPayloadJson()).isNull();
+            verifyNoInteractions(publisher,lookup);
+            var a=agentsFor(task.getId()).get(index);
+            assertThat(a.getMaxModelCalls()).isEqualTo(20);
+            int step=steps.merge(index,1,Integer::sum);
+            if(step==1) {
+                try {
+                    String initial=readInitialUser(a);
+                    for(int f=0;f<5;f++) if(!json.readTree(a.getFilePathsJson()).toString().contains("File"+f+".java")) assertThat(initial).doesNotContain("File"+f+".java");
+                } catch(Exception e) { throw new IllegalStateException(e); }
+                return response(tool("scope", "get_diff", "{}"));
+            }
+            String diff=lastResults(p).getFirst().responseData();
+            try {
+                for(int i=0;i<5;i++) {
+                    boolean own=json.readTree(a.getFilePathsJson()).toString().contains("File"+i+".java");
+                    if(own) assertThat(diff).contains("File"+i+".java"); else assertThat(diff).doesNotContain("File"+i+".java");
+                }
+            } catch(Exception e) { throw new IllegalStateException(e); }
+            if(index==0 && step==2) return textResponse("Continue");
+            return response(tool("finish", "publish_review", "{}"));
+        };
+        runtime.run(task.getId());
+        assertThat(order).containsExactly(0,0,0,1,1);
+        var all=agentsFor(task.getId()); assertThat(all).extracting(ReviewAgentEntity::getModelCalls).containsExactly(3,2);
+        assertThat(all).extracting(ReviewAgentEntity::getSuccess).containsOnly(true);
+        for(var a:all) assertThat(rounds.selectList(Wrappers.<ToolRoundEntity>lambdaQuery().eq(ToolRoundEntity::getAgentId,a.getId()).orderByAsc(ToolRoundEntity::getRoundNumber))).extracting(ToolRoundEntity::getRoundNumber).containsExactly(1,2);
+        assertThat(model.plannerCalls.get()).isEqualTo(1);
+        verify(publisher,times(1)).publish(anyString(),anyInt(),anyString(),anyString(),eq("No issues found."));
+        runtime.run(task.getId()); assertThat(model.reviewCalls.get()).isEqualTo(5);
+        verify(publisher,times(1)).publish(anyString(),anyInt(),anyString(),anyString(),anyString());
+    }
+    @Test void multiAgentFailureStopsRemainingAgentsAndParent() throws Exception {
+        useSynthetic(5); var task=task("RUNNING"); String plan=planJson(5,3);
+        model.routed=p -> {
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int i=currentIndex(p,task.getId());
+            if(i==0) return response(tool("finish","publish_review","{}"));
+            assertThat(i).isEqualTo(1); return textResponse("Continue");
+        };
+        assertThat(runtime.run(task.getId()).status()).isEqualTo(ReviewStatus.FAILED);
+        var all=agentsFor(task.getId()); assertThat(all).extracting(ReviewAgentEntity::getSuccess).containsExactly(true,false,null);
+        assertThat(all).extracting(ReviewAgentEntity::getModelCalls).containsExactly(1,20,0); verifyNoInteractions(publisher);
+    }
+    @Test void multiAgentPartialRestoreSkipsSuccessAndAbandonsOpenRound() throws Exception {
+        useSynthetic(5); var task=task("RUNNING"); String plan=planJson(5,3);
+        java.util.concurrent.atomic.AtomicBoolean failing=new java.util.concurrent.atomic.AtomicBoolean(true);
+        Map<Integer,Integer> steps=new HashMap<>();
+        model.routed=p -> {
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int i=currentIndex(p,task.getId()); int step=steps.merge(i,1,Integer::sum);
+            if(i==0) return response(tool("finish","publish_review","{}"));
+            if(i==1 && step==1) return response(tool("add","add_finding","{\"severity\":\"high\",\"category\":\"bug\",\"file\":\"File1.java\",\"startLine\":1,\"description\":\"Saved finding\"}"));
+            if(i==1 && failing.get()) throw new IllegalStateException("temporary model outage");
+            if(i==1) {
+                var calls=p.getInstructions().stream().filter(AssistantMessage.class::isInstance).map(AssistantMessage.class::cast).flatMap(a->a.getToolCalls().stream()).toList();
+                assertThat(calls).extracting(AssistantMessage.ToolCall::id).containsExactly("add");
+                assertThat(p.getInstructions().toString()).contains("Saved finding");
+            }
+            return response(tool("finish","publish_review","{}"));
+        };
+        assertThatThrownBy(()->runtime.run(task.getId())).hasMessage("temporary model outage");
+        var before=agentsFor(task.getId()); assertThat(before).extracting(ReviewAgentEntity::getSuccess).containsExactly(true,null,null);
+        assertThat(before).extracting(ReviewAgentEntity::getModelCalls).containsExactly(1,2,0);
+        store.beginRound(before.get(1).getId(),2,response(tool("never","get_diff","{}")).getResult().getOutput());
+        failing.set(false); runtime.run(task.getId());
+        var after=agentsFor(task.getId()); assertThat(after).extracting(ReviewAgentEntity::getModelCalls).containsExactly(1,3,1);
+        assertThat(after).extracting(ReviewAgentEntity::getInitialMessagesJson).containsExactlyElementsOf(before.stream().map(ReviewAgentEntity::getInitialMessagesJson).toList());
+        assertThat(history(task.getId()).stream().filter(r->r.getAgentId().equals(before.get(1).getId()))).extracting(ToolRoundEntity::getStatus).containsExactly("COMPLETED","ABANDONED","COMPLETED");
+        assertThat(model.plannerCalls.get()).isEqualTo(1); assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("PUBLISHED");
+    }
+    @Test void repositorySourceOutsideAssignedDiffRemainsReadable() throws Exception {
+        useSynthetic(5); var task=task("RUNNING"); String plan=planJson(5,2); Map<Integer,Integer> steps=new HashMap<>();
+        model.routed=p->{
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int i=currentIndex(p,task.getId()); if(steps.merge(i,1,Integer::sum)==1) return response(tool("related","read_file","{\"path\":\"File"+(i==0?1:0)+".java\"}"),tool("related-search","search_code","{\"query\":\"class File"+(i==0?1:0)+"\"}"));
+            assertThat(lastResults(p)).hasSize(2).allMatch(r->r.responseData().contains("class File")); return response(tool("finish","publish_review","{}"));
+        }; runtime.run(task.getId());
+    }
+    @Test void consumerAutomaticallyRecoversPendingAfterModelOutage() throws Exception {
+        var task=task("PENDING"); model.steps.add(p->{throw new IllegalStateException("recoverable outage");});
+        enqueue(task); await(()->reviewWorkerExecutor.getActiveCount()==0 && model.reviewCalls.get()==1);
+        assertThat(pendingCount()).isEqualTo(1); assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+        model.steps.add(p->response(tool("finish","publish_review","{}")));
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+        while(System.nanoTime()<deadline && !"PUBLISHED".equals(runs.selectById(task.getId()).getStatus())) { consumer.consumeNewMessages(); Thread.sleep(25); }
+        assertThat(runs.selectById(task.getId()).getStatus()).as("Consumer must reclaim pending and resume without manual Runtime invocation").isEqualTo("PUBLISHED");
+        assertThat(pendingCount()).isZero();
+    }
+    @Test void webhookMultiAgentFindingsAggregateExactlyAndAck() throws Exception {
+        useSynthetic(5);
+        var task=signedTask(ThreadLocalRandom.current().nextInt(1,Integer.MAX_VALUE),UUID.randomUUID().toString().replace("-","")+"00000000","opened","pull_request");
+        String plan=planJson(5,2); Map<Integer,Integer> steps=new HashMap<>();
+        model.routed=p->{
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int i=currentIndex(p,task.getId());
+            assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+            assertThat(runs.selectById(task.getId()).getPublicationPayloadJson()).isNull(); verifyNoInteractions(publisher,lookup);
+            if(steps.merge(i,1,Integer::sum)==1) return response(tool("add","add_finding",argsUnchecked("File"+i+".java",1,"First line \"quoted\"\nSecond line")));
+            return response(tool("finish","publish_review","{}"));
+        };
+        dispatcher.publishPendingEvents();consumer.consumeNewMessages();finishConsumer(task);
+        var all=agentsFor(task.getId()); assertThat(all).extracting(ReviewAgentEntity::getSuccess).containsExactly(true,true);
+        var aggregate=json.readValue(runs.selectById(task.getId()).getReviewStateJson(),StoredReviewState.class);
+        assertThat(aggregate.findings()).hasSize(2);
+        StringBuilder expected=new StringBuilder("Findings (2 total):");
+        for(var f:aggregate.findings()) expected.append("\n- [high] "+f.file()+":1 (open) id="+f.id()+"\n  First line \"quoted\"\nSecond line");
+        String body=json.readTree(runs.selectById(task.getId()).getPublicationPayloadJson()).get("body").asText();
+        assertThat(body).isEqualTo(expected.toString());
+        verify(publisher,times(1)).publish(anyString(),anyInt(),anyString(),anyString(),eq(body));
+        runtime.run(task.getId());assertThat(model.plannerCalls.get()).isEqualTo(1);assertThat(model.reviewCalls.get()).isEqualTo(4);
+        assertThat(pendingCount()).isZero();
+    }
+    @Test void crossAgentIdenticalFindingMustAggregateOnce() throws Exception {
+        useSynthetic(5);var task=task("RUNNING");String plan=planJson(5,2);Map<Integer,Integer> steps=new HashMap<>();
+        model.routed=p->{
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            int i=currentIndex(p,task.getId());
+            if(steps.merge(i,1,Integer::sum)==1) return response(tool("duplicate","add_finding","{\"severity\":\"high\",\"category\":\"bug\",\"file\":\"File0.java\",\"startLine\":1,\"description\":\"Same root cause\"}"));
+            return response(tool("finish","publish_review","{}"));
+        };runtime.run(task.getId());
+        assertThat(json.readValue(runs.selectById(task.getId()).getReviewStateJson(),StoredReviewState.class).findings()).as("Identical findings from separate Agents must not publish twice").hasSize(1);
+    }
+
+    private StoredToolResponseMessage storedResponses(ToolRoundEntity round) {
+        try { return json.readValue(round.getToolResponseJson(),StoredToolResponseMessage.class); }
+        catch(Exception error) { throw new IllegalStateException(error); }
+    }
+    @Test void mixedRoundPersistsFindingRejectsPublishThenCompletesNextRound() throws Exception {
+        var task=task("RUNNING");
+        model.steps.add(p->response(tool("write","add_finding",argsUnchecked(SOURCE,58,"Saved before publication")),tool("mixed","publish_review","{}")));
+        model.steps.add(p->{
+            var responses=lastResults(p);
+            assertThat(responses).extracting(ToolResponseMessage.ToolResponse::id).containsExactly("write","mixed");
+            assertThat(responses.getFirst().responseData()).contains("Finding added:");
+            assertThat(responses.getLast().responseData()).contains("must be requested alone");
+            var persisted=history(task.getId());assertThat(persisted).hasSize(1);
+            var results=storedResponses(persisted.getFirst());
+            assertThat(results.responses()).extracting(StoredToolResponseMessage.StoredToolResult::success).containsExactly(true,false);
+            assertThat(agentState(task.getId()).findings()).hasSize(1);
+            assertThat(onlyAgent(task.getId()).getSuccess()).isNull();
+            assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+            assertThat(runs.selectById(task.getId()).getPublicationPayloadJson()).isNull();
+            verifyNoInteractions(lookup,publisher);
+            return response(tool("final","publish_review","{}"));
+        });
+        runtime.run(task.getId());assertPublished(task.getId(),2,2);
+        assertThat(agentState(task.getId()).findings()).hasSize(1);
+        verify(publisher,times(1)).publish(anyString(),anyInt(),anyString(),anyString(),contains("Saved before publication"));
+    }
+    @Test void lostConsumerPendingEntryMustBeReclaimed() throws Exception {
+        var task=task("PENDING");consumer.consumeNewMessages();
+        var id=redis.opsForStream().add(STREAM,Map.of("run_id",task.getId().toString()));
+        var records=redis.<String,String>opsForStream().read(org.springframework.data.redis.connection.stream.Consumer.from(GROUP,"old-offline-consumer"),
+                org.springframework.data.redis.connection.stream.StreamReadOptions.empty().count(1),
+                org.springframework.data.redis.connection.stream.StreamOffset.create(STREAM,org.springframework.data.redis.connection.stream.ReadOffset.lastConsumed()));
+        assertThat(records).hasSize(1);assertThat(records.getFirst().getId()).isEqualTo(id);assertThat(pendingCount()).isEqualTo(1);
+        model.steps.add(p->response(tool("finish","publish_review","{}")));
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
+        while(System.nanoTime()<deadline && !"PUBLISHED".equals(runs.selectById(task.getId()).getStatus())) { consumer.consumeNewMessages();Thread.sleep(25); }
+        assertThat(runs.selectById(task.getId()).getStatus()).as("Entry owned by an offline consumer must be reclaimed").isEqualTo("PUBLISHED");assertThat(pendingCount()).isZero();
+    }
+    @Test void invalidPlannerResponseShapesNeverStartReview() throws Exception {
+        useSynthetic(5);
+        for(var supplier:List.<java.util.function.Supplier<ChatResponse>>of(()->null,()->new ChatResponse(List.of()),()->new ChatResponse(List.of(new Generation(null))))) {
+            var task=task("RUNNING");model.routed=p->supplier.get();
+            assertThatThrownBy(()->runtime.run(task.getId())).isInstanceOf(IllegalStateException.class);
+            assertThat(agentsFor(task.getId())).isEmpty();assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+        }
+        assertThat(model.reviewCalls.get()).isZero();verifyNoInteractions(publisher);
+    }
+
+    @Test void differentPrMultiAgentRunsKeepSerialIsolation() throws Exception {
+        useSynthetic(5);
+        int pr=ThreadLocalRandom.current().nextInt(1,Integer.MAX_VALUE-1);
+        var a=signedTask(pr,UUID.randomUUID().toString().replace("-","")+"00000000","opened","pull_request");
+        var b=signedTask(pr+1,UUID.randomUUID().toString().replace("-","")+"11111111","opened","pull_request");
+        String plan=planJson(5,2);CountDownLatch overlapping=new CountDownLatch(2);
+        Map<String,java.util.concurrent.atomic.AtomicInteger> steps=new ConcurrentHashMap<>();
+        Map<Long,List<Integer>> order=new ConcurrentHashMap<>();
+        Map<Long,java.util.concurrent.atomic.AtomicInteger> active=new ConcurrentHashMap<>();
+        Map<Long,java.util.concurrent.atomic.AtomicInteger> maximum=new ConcurrentHashMap<>();
+        for(var t:List.of(a,b)) { order.put(t.getId(),new CopyOnWriteArrayList<>());active.put(t.getId(),new java.util.concurrent.atomic.AtomicInteger());maximum.put(t.getId(),new java.util.concurrent.atomic.AtomicInteger()); }
+        model.routed=p->{
+            if(ScriptedChatModel.isPlanning(p)) return textResponse(plan);
+            var t=p.getInstructions().get(1).getText().contains(a.getHeadSha())?a:b;
+            int index=currentIndex(p,t.getId());String key=t.getId()+":"+index;
+            int n=steps.computeIfAbsent(key,k->new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
+            order.get(t.getId()).add(index);
+            int running=active.get(t.getId()).incrementAndGet();maximum.get(t.getId()).accumulateAndGet(running,Math::max);
+            try {
+                if(index==0 && n==1) { overlapping.countDown();assertThat(overlapping.await(5,TimeUnit.SECONDS)).as("Two PRs overlap in real workers").isTrue(); }
+                if(n==1) return response(tool("add","add_finding",argsUnchecked("File"+index+".java",1,"Task marker "+t.getHeadSha())));
+                return response(tool("finish","publish_review","{}"));
+            } catch(InterruptedException error) {Thread.currentThread().interrupt();throw new IllegalStateException(error);}
+            finally {active.get(t.getId()).decrementAndGet();}
+        };
+        dispatcher.publishPendingEvents();consumer.consumeNewMessages();finishConsumer(a);finishConsumer(b);
+        for(var t:List.of(a,b)) {
+            assertThat(order.get(t.getId())).containsExactly(0,0,1,1);assertThat(maximum.get(t.getId()).get()).isEqualTo(1);
+            assertThat(agentsFor(t.getId())).extracting(ReviewAgentEntity::getModelCalls).containsExactly(2,2);
+            String body=json.readTree(runs.selectById(t.getId()).getPublicationPayloadJson()).get("body").asText();
+            assertThat(body).contains(t.getHeadSha()).doesNotContain(t==a?b.getHeadSha():a.getHeadSha());
+        }
+        assertThat(model.plannerCalls.get()).isEqualTo(2);assertThat(model.reviewCalls.get()).isEqualTo(8);assertThat(pendingCount()).isZero();
+        verify(publisher,times(2)).publish(anyString(),anyInt(),anyString(),anyString(),anyString());
+    }
+    @Test void multiAgentConsumerOutagePreservesPlanBudgetAndPendingMessage() throws Exception {
+        useSynthetic(5);var task=task("PENDING");String plan=planJson(5,3);java.util.concurrent.atomic.AtomicBoolean broken=new java.util.concurrent.atomic.AtomicBoolean(true);
+        model.routed=p->{
+            if(ScriptedChatModel.isPlanning(p))return textResponse(plan);
+            int i=currentIndex(p,task.getId());
+            if(i==1 && broken.get())throw new IllegalStateException("temporary group outage");
+            return response(tool("finish","publish_review","{}"));
+        };
+        enqueue(task);await(()->reviewWorkerExecutor.getActiveCount()==0 && model.reviewCalls.get()==2);
+        assertThat(pendingCount()).isEqualTo(1);assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("RUNNING");
+        assertThat(agentsFor(task.getId())).extracting(ReviewAgentEntity::getSuccess).containsExactly(true,null,null);
+        assertThat(agentsFor(task.getId())).extracting(ReviewAgentEntity::getModelCalls).containsExactly(1,1,0);verifyNoInteractions(publisher);
+        broken.set(false);runtime.run(task.getId()); // Explicit recovery, deliberately does not ACK the original PEL entry.
+        assertThat(model.plannerCalls.get()).isEqualTo(1);assertThat(agentsFor(task.getId())).extracting(ReviewAgentEntity::getModelCalls).containsExactly(1,2,1);
+        assertThat(runs.selectById(task.getId()).getStatus()).isEqualTo("PUBLISHED");assertThat(pendingCount()).isEqualTo(1);
+    }
+
+    @Test void failureObserverRecordsBudgetCorrelationAndPendingWithoutContent() throws Exception {
+        var task=task("PENDING");String sentinel="PRIVATE_OBSERVER_SENTINEL_76d2";
+        model.steps.add(p->textResponse(sentinel));
+        model.steps.add(p->{throw new IllegalStateException("temporary provider outage");});
+        enqueue(task);await(()->reviewWorkerExecutor.getActiveCount()==0 && model.reviewCalls.get()==2);
+        assertThat(pendingCount()).isEqualTo(1);assertThat(onlyAgent(task.getId()).getModelCalls()).isEqualTo(2);
+        event("stream.pending taskId="+task.getId()+" agentId="+onlyAgent(task.getId()).getId()+" pending="+pendingCount());
+        var lines=Files.readAllLines(Path.of("target/e2e-logs/intermediate.log")).stream().filter(l->l.contains("scenario="+scenario+" ")).toList();
+        String events=String.join("\n",lines);
+        assertThat(events).contains("taskId="+task.getId(),"agentId="+onlyAgent(task.getId()).getId(),"agentBudget=2","errorType=IllegalStateException","stream.pending","pending=1","promptSha256=");
+        assertThat(events.contains(sentinel)||events.contains("e2e-secret")||events.contains("package org.keycloak")).isFalse();
+    }
+
+    @Test void offlineContextContainsOnlyScriptedModel() {
+        assertThat(applicationContext.getBeansOfType(ChatModel.class)).hasSize(1).containsValue(model);
+        assertThat(env.getProperty("spring.ai.model.chat")).isEqualTo("none");
+        assertThat(applicationContext.getBeanNamesForType(org.springframework.ai.openai.OpenAiChatModel.class)).isEmpty();
+    }
+
     static void await(BooleanSupplier condition) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(25);
@@ -1553,15 +1971,15 @@ class ReviewAgentFlowIT {
     }
 
     @Configuration
-    @EnableAutoConfiguration
+    @EnableAutoConfiguration(excludeName = {"org.springframework.ai.model.openai.autoconfigure.OpenAiChatAutoConfiguration","org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration","org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration","org.springframework.ai.model.openai.autoconfigure.OpenAiAudioSpeechAutoConfiguration","org.springframework.ai.model.openai.autoconfigure.OpenAiAudioTranscriptionAutoConfiguration","org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration"})
     @MapperScan("com.guodi.pragent.persistence")
     @Import({ReviewReActRuntime.class, ReviewHarness.class, ReviewRunRestorer.class, ReviewContextBuilder.class,
             ToolRoundCoordinator.class, ToolRoundStore.class, ToolRoundExecutor.class, ToolExecutor.class,
-            ReviewToolConfig.class, ReviewReadTools.class, FindingWriteTools.class, ReviewTerminalTools.class,
+            ReviewAgentStore.class, ReviewPlanGenerator.class, ReviewToolConfig.class, ReviewReadTools.class, FindingWriteTools.class, ReviewTerminalTools.class,
             ReadToolExecutorConfig.class, GitHubWebhookController.class, GitHubWebhookService.class,
             ReviewOutboxPublisher.class, ReviewStreamConsumer.class})
     static class Config {
-        @Bean ScriptedChatModel scriptedModel() { return new ScriptedChatModel(); }
+        @Bean @Primary ScriptedChatModel scriptedModel() { return new ScriptedChatModel(); }
         @Bean GitHubWorkspacePreparer workspacePreparer() { return mock(GitHubWorkspacePreparer.class); }
         @Bean GitHubReviewLookup reviewLookup() { return mock(GitHubReviewLookup.class); }
         @Bean GitHubReviewPublisher reviewPublisher() { return mock(GitHubReviewPublisher.class); }

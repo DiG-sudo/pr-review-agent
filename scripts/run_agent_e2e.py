@@ -116,6 +116,12 @@ def main(argv=None):
         all_cases, exit_code = {}, 0
         phases = ['l0', 'agent'] if args.phase == 'all' else [args.phase]
         try:
+            if plan.exists():
+                expected = set(re.findall(r'^\| (AG-[A-Z0-9]+-\d{3}) \|', plan.read_text(), re.MULTILINE))
+                manifest = json.loads((ROOT / 'scripts/agent_e2e_requirements.json').read_text())
+                actual = [item['id'] for item in manifest]
+                if expected != set(actual) or len(actual) != len(set(actual)):
+                    raise ValueError('Requirements manifest does not exactly match current plan IDs')
             self_code = run_command([sys.executable, '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_run_agent_e2e.py'], ROOT, run / 'runner-tests.log')
             report.append(f'| runner | stdlib checks | {"PASS" if self_code == 0 else "FAIL"} | - |')
             if self_code:
@@ -123,6 +129,8 @@ def main(argv=None):
             else:
                 for phase in phases:
                     command = ['mvn', '-B', '-Dstyle.color=never']
+                    if phase == 'l0':
+                        command.append('-Dtest=*Test')
                     if phase == 'agent':
                         requirements = json.loads((ROOT / 'scripts/agent_e2e_requirements.json').read_text())
                         source = ROOT / 'src/test/java/com/guodi/pragent/e2e/ReviewAgentFlowIT.java'
@@ -136,6 +144,9 @@ def main(argv=None):
                         else:
                             command.append('-Dtest=ReviewAgentFlowIT')
                     command.append('test')
+                    if phase == 'l0':
+                        shutil.rmtree(ROOT / 'target/test-classes', ignore_errors=True)
+                        shutil.rmtree(ROOT / 'target/maven-status/maven-compiler-plugin/testCompile', ignore_errors=True)
                     started = time.time()
                     print(f'Running {phase}; live output: {run / (phase + "-console.log")}', flush=True)
                     code = run_command(command, ROOT, run / f'{phase}-console.log')
@@ -172,11 +183,26 @@ def main(argv=None):
                        'Production SHA-256 unchanged: ' + str(production == after)]
             if production != after:
                 exit_code = exit_code or 1
+            case_dir = run / 'cases'
+            case_dir.mkdir(exist_ok=True)
             for file in logs.glob('*.log'):
                 if file.stat().st_mtime >= started_run:
                     shutil.copy2(file, run / file.name)
+                    if file.name != 'intermediate.log': shutil.copy2(file, case_dir / file.name)
+            offline = logs / 'offline-model.json'
+            if 'agent' in phases and all_cases:
+                if not offline.exists() or offline.stat().st_mtime < started_run:
+                    report.append('Offline model attestation missing: ERROR')
+                    exit_code = exit_code or 1
+                else:
+                    proof = json.loads(offline.read_text())
+                    shutil.copy2(offline, run / offline.name)
+                    if proof.get('realLlmRequests') != 0 or proof.get('realChatModelBeans') != 0:
+                        exit_code = exit_code or 1
+                    report.append('Offline model attestation: ' + json.dumps(proof))
             for file in ('agent_e2e_requirements.json',):
                 shutil.copy2(ROOT / 'scripts' / file, run / file)
+            (run / 'ENVIRONMENT.md').write_text('Java 21; isolated MySQL pr_review_agent_e2e_test; Redis DB14; production Stream names isolated by DB14.\nModels: ScriptedChatModel only; all OpenAI auto-configurations excluded.\nSee offline-model.json for model boundary attestation; this is configuration evidence, not packet capture.\n')
             report += ['', 'Real model/GitHub smoke and quality evaluation: EXCLUDED.',
                        'Excluded: forced interrupt, direct same-task concurrency, external status mutation, duplicate call IDs.',
                        'Observer events are test-side evidence, not production Trace.', '', f'Exit code: {exit_code}', '']

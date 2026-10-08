@@ -1,157 +1,345 @@
 [
   {
-    "id": "AG-E2E-001",
+    "id": "AG-PLAN-001",
     "tests": [
-      "webhookMultilineBodyExactAndAck"
+      "planningThresholdUsesNoPlannerForOneAndFourFiles"
     ],
-    "assertions": "签名 webhook 到 ACK；多行纯文本正文/快照/工具轮/次数严格一致"
+    "assertions": "1–4 个文件不分组；计划模型调用 0 次；只创建一个 Agent；覆盖全部文件"
   },
   {
-    "id": "AG-E2E-002",
+    "id": "AG-PLAN-002",
     "tests": [
-      "webhookNoFindingsExactBodyAndAck"
+      "largePlansCoverEveryFileOnceWithAtMostFourAgents"
     ],
-    "assertions": "签名 webhook 到 ACK；正文精确 No issues found."
+    "assertions": "5+ 文件分组；计划模型恰好调用 1 次；创建 2–4 个 Agent；每个文件恰好属于一组"
   },
   {
-    "id": "AG-E2E-003",
+    "id": "AG-PLAN-003",
     "tests": [
-      "invalidArgumentsAndReadsReturnFailuresThenContinue",
-      "correctedReadAndSearchEscape",
-      "unknownFindingUpdateFailsThenAgentContinues"
+      "invalidPlansLeaveNoAgentsAndDoNotStartReviewer",
+      "invalidPlannerResponseShapesNeverStartReview"
     ],
-    "assertions": "非法 JSON/缺参/文件缺失/分页失败回填后修正并继续"
+    "assertions": "计划输出非法；重复、缺失、未知文件、空组、组数越界均拒绝；不启动审查模型"
   },
   {
-    "id": "AG-E2E-004",
+    "id": "AG-PLAN-004",
     "tests": [
-      "budgetExhaustionPersistsFailure",
-      "consumerBudgetFailureIsTerminalAndAcknowledged",
-      "repeatedModelFailuresCannotResetBudget"
+      "planInsertionFailureRollsBackEveryAgent"
     ],
-    "assertions": "预算耗尽 FAILED/ACK，无发布；多次恢复预算不归零"
+    "assertions": "计划原子落库；中途插入失败时不保留半份 Agent 计划；父任务保持可恢复状态"
   },
   {
-    "id": "AG-E2E-005",
+    "id": "AG-PLAN-005",
     "tests": [
+      "multiAgentPartialRestoreSkipsSuccessAndAbandonsOpenRound"
+    ],
+    "assertions": "已有计划恢复；不再次调用计划模型；Agent 顺序、文件范围和预算保持不变"
+  },
+  {
+    "id": "AG-MA-001",
+    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent"
+    ],
+    "assertions": "Agent 串行执行；同时运行的 Agent 最大值为 1；按 agentIndex 执行"
+  },
+  {
+    "id": "AG-MA-002",
+    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent",
+      "multiAgentPartialRestoreSkipsSuccessAndAbandonsOpenRound"
+    ],
+    "assertions": "上下文和工具轮隔离；初始消息、历史、轮号、tool_round.agent_id、Finding 快照不串组"
+  },
+  {
+    "id": "AG-MA-003",
+    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent",
+      "multiAgentFailureStopsRemainingAgentsAndParent"
+    ],
+    "assertions": "独立预算；每个 Agent 初始预算相同；调用计数独立；一个 Agent 消耗不影响其他 Agent"
+  },
+  {
+    "id": "AG-MA-004",
+    "tests": [
+      "multiAgentPartialRestoreSkipsSuccessAndAbandonsOpenRound"
+    ],
+    "assertions": "部分完成后恢复；已完成 Agent 跳过；未完成 Agent 恢复；OPEN 轮转 ABANDONED；不重放调用"
+  },
+  {
+    "id": "AG-MA-005",
+    "tests": [
+      "multiAgentFailureStopsRemainingAgentsAndParent"
+    ],
+    "assertions": "确定性失败；当前 Agent 标记 false，父任务 FAILED，后续 Agent 不执行，不发布"
+  },
+  {
+    "id": "AG-MA-006",
+    "tests": [
+      "multiAgentPartialRestoreSkipsSuccessAndAbandonsOpenRound",
       "consumerModelFailureRemainsPendingWithoutAutomaticRecovery",
-      "modelFailurePreservesBudgetAndCanRestore"
+      "consumerAutomaticallyRecoversPendingAfterModelOutage",
+      "multiAgentConsumerOutagePreservesPlanBudgetAndPendingMessage"
     ],
-    "assertions": "模型异常 PEL/预算/清理；显式组件恢复，非 PEL 自动认领"
+    "assertions": "可恢复异常；当前 Agent 保持 null，父任务保持 RUNNING，异常向 Consumer 传播且不 ACK"
   },
   {
-    "id": "AG-E2E-006",
+    "id": "AG-MA-007",
     "tests": [
-      "consumerExistingPublicationSkipsPostAndAcks",
-      "consumerLookupFailureLeavesReadyWithoutPost",
-      "consumerExplicitPublicationFailureCanRetryWithoutModel",
-      "consumerUncertainPublicationReconcilesWithoutPostOrAck",
-      "consumerLocalPublicationCommitFailureReconcilesWithoutPost"
+      "webhookMultiAgentFindingsAggregateExactlyAndAck"
     ],
-    "assertions": "首次/已存在/查询失败/明确失败/响应丢失/本地提交失败；恢复不重 POST，原 PEL 不自动 ACK"
+    "assertions": "全部完成后聚合；所有 Agent true 后才生成最终正文并置 PUBLICATION_READY"
   },
   {
-    "id": "AG-ENTRY-001",
+    "id": "AG-MA-008",
     "tests": [
-      "webhookToAckAndDuplicateIntake",
-      "ignoredWebhookDoesNotCreateTask",
-      "webhookOutboxFailureRollsBackTask"
-    ],
-    "assertions": "唯一任务/Outbox、签名和无关事件、接收事务回滚"
-  },
-  {
-    "id": "AG-ENTRY-002",
-    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent",
+      "webhookMultiAgentFindingsAggregateExactlyAndAck",
       "duplicateStreamEntriesOnlyOneRuntimeExecution"
     ],
-    "assertions": "同 run Stream 副本通过 CAS 只执行一次；重复 ACK 原消息保持 pending 直到完成"
-  },
-  {
-    "id": "AG-ENTRY-003",
-    "tests": [
-      "samePrRevisionsKeepIndependentState",
-      "differentPrReviewsKeepIndependentState"
-    ],
-    "assertions": "按 head 路由模型脚本、真实 Consumer 并发、状态/轮次/正文/Workspace 隔离；旧 revision 发布仅观察"
+    "assertions": "聚合与发布幂等；多 Agent 只发布一次；恢复和重复投递不再次调用审查模型或 POST"
   },
   {
     "id": "AG-RT-001",
     "tests": [
       "ordinaryTextContinuesBeforeStandalonePublication"
     ],
-    "assertions": "普通文本和继续提示进入下轮，无虚假工具轮"
+    "assertions": "模型返回普通文本；加入历史并提示继续，随后进入下一轮"
   },
   {
     "id": "AG-RT-002",
     "tests": [
-      "reverseReadCompletionKeepsOriginalOrder"
+      "reverseReadCompletionKeepsOriginalOrder",
+      "mainFlow"
     ],
-    "assertions": "屏障证明 READ 重叠/逆序完成；Prompt 和数据库按原始 ID 顺序"
+    "assertions": "READ 工具并行；屏障证明并行重叠；响应顺序与 ToolCall 顺序一致"
   },
   {
     "id": "AG-RT-003",
     "tests": [
-      "writeThenListSeesNewAndUpdatedFindingInSameRound",
-      "unknownFindingUpdateFailsThenAgentContinues"
+      "writeThenListSeesNewAndUpdatedFindingInSameRound"
     ],
-    "assertions": "WRITE 后 READ；Finding 更新/持久化；未知 ID 回填失败"
+    "assertions": "WRITE/READ 顺序；写工具按调用顺序执行，依赖读取看到前序写入状态"
   },
   {
     "id": "AG-RT-004",
     "tests": [
-      "mixedPublicationKeepsCompleteIntentAndCanContinue",
-      "invalidArgumentsAndReadsReturnFailuresThenContinue"
+      "invalidArgumentsAndReadsReturnFailuresThenContinue",
+      "correctedReadAndSearchEscape",
+      "unknownFindingUpdateFailsThenAgentContinues"
     ],
-    "assertions": "混合单/多 publish 原位置失败、完整意图、非发布轮 RUNNING"
+    "assertions": "工具失败后修正；非法参数、文件不存在、越界以工具失败响应回填；模型可下一轮修正"
   },
   {
     "id": "AG-RT-005",
+    "tests": [
+      "mixedPublicationKeepsCompleteIntentAndCanContinue",
+      "mixedRoundPersistsFindingRejectsPublishThenCompletesNextRound"
+    ],
+    "assertions": "混合调用时其他工具正常执行并保存；只拒绝 publish_review，提示下一轮单独调用；成功单独调用前不完成 Agent 或进入发布状态"
+  },
+  {
+    "id": "AG-RT-006",
+    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent"
+    ],
+    "assertions": "独立完成调用；单独 `publish_review` 成功后只标记当前 Agent 完成"
+  },
+  {
+    "id": "AG-RT-007",
     "tests": [
       "invalidModelResponseKeepsRecoverableState",
       "emptyModelGenerationsAreRejected",
       "modelGenerationWithoutOutputIsRejected",
       "consumerInvalidResponsesRemainPending"
     ],
-    "assertions": "null/无 result/无 output 拒绝；预算保留、清理、原 PEL"
+    "assertions": "非法模型响应；null、无输出或结构异常被拒绝；已预占预算保留；状态可恢复"
   },
   {
-    "id": "AG-HR-001",
+    "id": "AG-RT-008",
     "tests": [
-      "initializationIsCommittedBeforeModelAndToolsMatchRegistry",
-      "initializationFailurePreventsModelAndCleansWorkspace",
+      "budgetExhaustionPersistsFailure",
+      "consumerBudgetFailureIsTerminalAndAcknowledged",
+      "repeatedModelFailuresCannotResetBudget"
+    ],
+    "assertions": "预算耗尽；不再发起额外模型调用；返回确定性失败结果"
+  },
+  {
+    "id": "AG-RT-009",
+    "tests": [
       "intentStoreFailurePreventsToolExecution",
+      "consumerStoreFailuresLeaveOriginalPendingAndRestore"
+    ],
+    "assertions": "工具意图保存失败；不执行工具；不生成虚假的完成轮或 Finding 快照"
+  },
+  {
+    "id": "AG-RT-010",
+    "tests": [
       "completionFailureRollsBackRoundAndFindingSnapshot",
       "consumerStoreFailuresLeaveOriginalPendingAndRestore"
     ],
-    "assertions": "初始化/预算先提交；真实工具注册协议；初始化/意图失败零执行；真实事务回滚；Consumer PEL"
+    "assertions": "完成事务失败；工具轮、工具响应、Finding 和 Agent 成功状态一起回滚"
   },
   {
-    "id": "AG-HR-002",
+    "id": "AG-E2E-001",
     "tests": [
-      "restoreNonemptyFindingsCompletedAndOpenRoundsWithoutReplay",
-      "repeatedModelFailuresCannotResetBudget"
+      "webhookMultilineBodyExactAndAck"
     ],
-    "assertions": "非空 Findings/初始消息/完成历史恢复，OPEN abandoned、不重放、预算和轮号持续"
+    "assertions": "单 Agent 有 Findings；签名 webhook 到 PUBLISHED；正文、external ID、ACK 正确"
   },
   {
-    "id": "AG-HR-003",
+    "id": "AG-E2E-002",
     "tests": [
-      "realLocalGitWorkspaceRunsAndRejectsBothShaMismatchesBeforeModel",
-      "consumerStoreFailuresLeaveOriginalPendingAndRestore",
+      "webhookNoFindingsExactBodyAndAck"
+    ],
+    "assertions": "单 Agent 无 Findings；正文精确为纯文本 `No issues found.`，无 JSON 双引号"
+  },
+  {
+    "id": "AG-E2E-003",
+    "tests": [
+      "webhookMultiAgentFindingsAggregateExactlyAndAck"
+    ],
+    "assertions": "多 Agent 有 Findings；每组独立审查，聚合正文精确且只发布一次"
+  },
+  {
+    "id": "AG-E2E-004",
+    "tests": [
+      "webhookMultilineBodyExactAndAck",
+      "webhookMultiAgentFindingsAggregateExactlyAndAck"
+    ],
+    "assertions": "多行正文；数据库、Agent 完成结果和 Publisher 输入一致，无 JSON 转义污染"
+  },
+  {
+    "id": "AG-E2E-005",
+    "tests": [
+      "webhookToAckAndDuplicateIntake"
+    ],
+    "assertions": "重复 webhook；同 repository、PR、head 只创建一个父任务和一个 Outbox 事件"
+  },
+  {
+    "id": "AG-E2E-006",
+    "tests": [
+      "webhookToAckAndDuplicateIntake",
+      "ignoredWebhookDoesNotCreateTask"
+    ],
+    "assertions": "非法或无关 webhook；非法签名拒绝；非目标事件不创建任务"
+  },
+  {
+    "id": "AG-E2E-007",
+    "tests": [
+      "webhookOutboxFailureRollsBackTask"
+    ],
+    "assertions": "Outbox 事务失败；不留下孤立 review_run 或半份 Outbox 数据"
+  },
+  {
+    "id": "AG-E2E-008",
+    "tests": [
+      "duplicateStreamEntriesOnlyOneRuntimeExecution"
+    ],
+    "assertions": "重复 Stream 消息；CAS/状态检查只允许一次执行和一次发布"
+  },
+  {
+    "id": "AG-E2E-009",
+    "tests": [
       "consumerModelFailureRemainsPendingWithoutAutomaticRecovery",
-      "consumerPublicationFailureRemainsPendingWithoutAutomaticRecovery"
+      "consumerAutomaticallyRecoversPendingAfterModelOutage",
+      "lostConsumerPendingEntryMustBeReclaimed"
     ],
-    "assertions": "本地 HTTP/JGit 固定 base/head，正常及模型/持久化/发布异常清理"
+    "assertions": "审查模型替身异常；Consumer 不 ACK，消息留 PEL；任务保持可恢复状态"
+  },
+  {
+    "id": "AG-E2E-010",
+    "tests": [
+      "consumerExplicitPublicationFailureCanRetryWithoutModel"
+    ],
+    "assertions": "发布明确失败；不 ACK；保持可恢复发布状态；不写虚假 external ID"
+  },
+  {
+    "id": "AG-E2E-011",
+    "tests": [
+      "consumerUncertainPublicationReconcilesWithoutPostOrAck",
+      "consumerExistingPublicationSkipsPostAndAcks"
+    ],
+    "assertions": "发布响应丢失；重试先 Lookup，找到远端评论后不重复 POST"
+  },
+  {
+    "id": "AG-E2E-012",
+    "tests": [
+      "consumerLocalPublicationCommitFailureReconcilesWithoutPost"
+    ],
+    "assertions": "远端成功、本地保存失败；恢复后 Lookup 补齐 external ID，不重复 POST"
+  },
+  {
+    "id": "AG-E2E-013",
+    "tests": [
+      "samePrRevisionsKeepIndependentState"
+    ],
+    "assertions": "不同 revision；同一 PR 的不同 head 分别处理，状态、Agent 计划和正文不串线"
+  },
+  {
+    "id": "AG-E2E-014",
+    "tests": [
+      "differentPrReviewsKeepIndependentState",
+      "differentPrMultiAgentRunsKeepSerialIsolation"
+    ],
+    "assertions": "不同 PR 并行；两条任务可并行；每条内部 Agent 仍串行；脚本按任务路由"
+  },
+  {
+    "id": "AG-E2E-015",
+    "tests": [
+      "scheduledOutboxAndConsumerReachAckWithoutManualDispatch"
+    ],
+    "assertions": "调度冒烟；不手工调用调度方法时，Outbox 与 Consumer 在有界时间内推进至终态"
+  },
+  {
+    "id": "AG-WS-001",
+    "tests": [
+      "realLocalGitWorkspaceRunsAndRejectsBothShaMismatchesBeforeModel"
+    ],
+    "assertions": "base/head 固定；本地 Git/HTTP 返回与任务 SHA 不一致时，在审查模型调用前失败"
+  },
+  {
+    "id": "AG-WS-002",
+    "tests": [
+      "mainFlow",
+      "webhookMultiAgentFindingsAggregateExactlyAndAck"
+    ],
+    "assertions": "正常清理；任务完成并关闭工具线程后删除临时 Workspace"
+  },
+  {
+    "id": "AG-WS-003",
+    "tests": [
+      "invalidPlansLeaveNoAgentsAndDoNotStartReviewer",
+      "initializationFailurePreventsModelAndCleansWorkspace",
+      "consumerStoreFailuresLeaveOriginalPendingAndRestore",
+      "consumerPublicationFailureRemainsPendingWithoutAutomaticRecovery",
+      "snapshotFailureStillCleansOwnedRowsAndWorkspace",
+      "snapshotAssertionFailureStillCleansData"
+    ],
+    "assertions": "异常清理；计划、模型、工具和发布异常均走 finally；没有仍运行的工具后再清理"
   },
   {
     "id": "AG-CTX-001",
+    "tests": [
+      "multiAgentSerialScopesBudgetsAndPublicationAreIndependent"
+    ],
+    "assertions": "Agent Diff 隔离；`get_diff` 只返回当前组文件；初始消息只列当前组"
+  },
+  {
+    "id": "AG-CTX-002",
+    "tests": [
+      "repositorySourceOutsideAssignedDiffRemainsReadable"
+    ],
+    "assertions": "源码调用链读取；`read_file`/`search_code` 可读取仓库内相关源码，不被错误限制为当前 Diff 组"
+  },
+  {
+    "id": "AG-CTX-003",
     "tests": [
       "groupsTheDiffByFileAndOmitsWholePatchesWhenTheLimitIsReached",
       "keepsRecentWholeRoundsAndMarksOnlyTheVisibleResultAsTruncated",
       "buildsTheSameContextShapeFromCommittedHistoryAndFindings",
       "largeRealReadTruncatesOnlyModelVisibleCopy"
     ],
-    "assertions": "初始 Diff 整文件省略；历史整组；权威 Findings；真实文件大结果仅裁剪副本"
+    "assertions": "大上下文裁剪；模型消息受限；数据库保存的原始 Diff/工具结果不被测试裁剪逻辑覆盖"
   },
   {
     "id": "AG-DOM-001",
@@ -160,35 +348,76 @@
       "findingUnchangedLineRejected",
       "findingOnActualAddedDiffLineIsAccepted"
     ],
-    "assertions": "非 Diff 文件/非变更行必须拒绝，真实缺口保留 FAIL"
+    "assertions": "Finding 必须落在 Diff；文件不在 Diff 或行号不在变更行时拒绝"
   },
   {
     "id": "AG-DOM-002",
     "tests": [
       "duplicateFindingMustNotCreateTwoIssues"
     ],
-    "assertions": "完全相同问题只保留一个 Finding；同位置不同根因规则未定义",
-    "blocked": "同位置不同根因的指纹规则未定义；完全相同 Finding 子用例仍执行并保留真实结果"
+    "assertions": "完全相同 Finding 去重；相同位置、规则和正文只保留一条"
+  },
+  {
+    "id": "AG-DOM-003",
+    "tests": [
+      "crossAgentIdenticalFindingMustAggregateOnce"
+    ],
+    "assertions": "跨 Agent 聚合去重；完全相同 Finding 只发布一次；不同根因规则未定义时标记 BLOCKED"
   },
   {
     "id": "AG-SEC-001",
     "tests": [
       "readAndSearchRejectExternalPaths",
-      "searchMustNotFollowNestedExternalSymlink",
-      "correctedReadAndSearchEscape",
+      "correctedReadAndSearchEscape"
+    ],
+    "assertions": "路径边界；拒绝 `../`、工作区外绝对路径和外部符号链接"
+  },
+  {
+    "id": "AG-SEC-002",
+    "tests": [
+      "searchMustNotFollowNestedExternalSymlink"
+    ],
+    "assertions": "搜索符号链接；`search_code` 不读取目录内指向工作区外的符号链接文件"
+  },
+  {
+    "id": "AG-SEC-003",
+    "tests": [
       "goldenSentinelStaysOutsideAgentAndObserverLogs"
     ],
-    "assertions": "../、外部绝对路径/链接含目录内链接；临时 evaluator 哨兵不入 Agent"
+    "assertions": "答案隔离；哨兵不进入 Prompt、AgentState、工具结果、日志或发布正文"
   },
   {
     "id": "AG-OBS-001",
     "tests": [
-      "isolatedEnvironmentAndRealCorePreflight",
-      "snapshotFailureStillCleansOwnedRowsAndWorkspace",
-      "snapshotAssertionFailureStillCleansData",
       "observerEventsAreCorrelatedAndDoNotExposeContent",
-      "scheduledOutboxAndConsumerReachAckWithoutManualDispatch"
+      "offlineContextContainsOnlyScriptedModel",
+      "webhookMultiAgentFindingsAggregateExactlyAndAck"
     ],
-    "assertions": "真实隔离环境；快照失败 finally 清理；定时推进 ACK；脚本自测/归档与哈希"
+    "assertions": "成功链路事件；能按 taskId/agentId/round 还原计划、模型、工具、聚合、发布和 ACK"
+  },
+  {
+    "id": "AG-OBS-002",
+    "tests": [
+      "observerEventsAreCorrelatedAndDoNotExposeContent",
+      "consumerModelFailureRemainsPendingWithoutAutomaticRecovery",
+      "failureObserverRecordsBudgetCorrelationAndPendingWithoutContent"
+    ],
+    "assertions": "失败链路事件；保存异常类型、发生阶段、预算和 PEL；不记录密钥、源码或完整正文"
+  },
+  {
+    "id": "AG-OBS-003",
+    "tests": [
+      "isolatedEnvironmentAndRealCorePreflight",
+      "offlineContextContainsOnlyScriptedModel"
+    ],
+    "assertions": "脚本结果可信；XML 缺失/损坏、失败、错误、意外跳过、超时、覆盖缺项均返回非零"
+  },
+  {
+    "id": "AG-OBS-004",
+    "tests": [
+      "snapshotFailureStillCleansOwnedRowsAndWorkspace",
+      "snapshotAssertionFailureStillCleansData"
+    ],
+    "assertions": "失败仍归档；L0 或集成测试失败后仍保存已有控制台、XML、事件和环境摘要"
   }
 ]

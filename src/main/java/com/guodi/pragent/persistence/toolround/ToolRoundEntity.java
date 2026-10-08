@@ -13,7 +13,7 @@ public class ToolRoundEntity {
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private Long runId;
+    private Long agentId;
 
     private Integer roundNumber;
 
@@ -24,5 +24,4 @@ public class ToolRoundEntity {
     /** Complete tool response before context truncation. */
     private String toolResponseJson;
 
-    private String publicationPayloadJson;
 }

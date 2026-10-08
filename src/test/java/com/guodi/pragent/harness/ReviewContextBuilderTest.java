@@ -42,8 +42,9 @@ class ReviewContextBuilderTest {
 
         ReviewState state = new ReviewState("thread");
         state.restoreFindings(List.of(finding));
-        ToolContext tools = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(workspace, state)));
-        ReviewExecution execution = new ReviewExecution(7L, initial, List.of(call, result), tools, 1, 10, 2);
+        ToolContext tools = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(workspace, state, "")));
+        ReviewExecution execution = new ReviewExecution(7L, 11L, initial,
+                List.of(call, result), tools, 1, 10, 2);
         List<Message> messages = context.buildModelMessages(execution);
 
         assertThat(messages).hasSize(5);

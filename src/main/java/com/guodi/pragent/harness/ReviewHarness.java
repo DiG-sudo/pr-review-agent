@@ -2,6 +2,7 @@ package com.guodi.pragent.harness;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -9,7 +10,6 @@ import java.util.function.Function;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
@@ -19,21 +19,26 @@ import org.springframework.stereotype.Component;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentEntity;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentStore;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentStore.AgentPlan;
 import com.guodi.pragent.persistence.reviewrun.StoredReviewState;
 import com.guodi.pragent.preparation.ReviewInitialMessagesBuilder;
+import com.guodi.pragent.preparation.ReviewPlanGenerator;
 import com.guodi.pragent.preparation.GitHubWorkspacePreparer;
 import com.guodi.pragent.reviewer.GitHubReviewLookup;
 import com.guodi.pragent.reviewer.GitHubReviewPublisher;
 import com.guodi.pragent.reviewer.ReviewRequest;
 import com.guodi.pragent.reviewer.ReviewState;
-import com.guodi.pragent.reviewer.tool.ReviewToolContext;
+import com.guodi.pragent.reviewer.Finding;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.preparation.GitHubWorkspacePreparer.ReviewWorkspace;
 import com.guodi.pragent.runtime.ReviewExecution;
+import com.guodi.pragent.runtime.AgentRunResult;
 import com.guodi.pragent.runtime.ReviewRunResult;
 import com.guodi.pragent.runtime.ReviewStatus;
-import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.tool.ToolRoundResult;
 import com.guodi.pragent.runtime.tool.ToolRegistry;
 
 /** 任务生命周期、推理准备、模型调用和工具轮的插入点。 */
@@ -45,6 +50,8 @@ public class ReviewHarness {
     private final ReviewContextBuilder reviewContextBuilder;
     private final ToolRegistry toolRegistry;
     private final ObjectMapper objectMapper;
+    private final ReviewAgentStore reviewAgentStore;
+    private final ReviewPlanGenerator reviewPlanGenerator;
     private final ReviewRunRestorer reviewRunRestorer;
     private final GitHubWorkspacePreparer workspacePreparer;
     private final GitHubReviewLookup reviewLookup;
@@ -55,6 +62,7 @@ public class ReviewHarness {
     @Value("${pr-review.execution.max-model-calls:20}")
     private int maxModelCalls = 20;
     public ReviewHarness(ReviewRunMapper reviewRunMapper,ToolRoundCoordinator toolRoundCoordinator,ReviewContextBuilder reviewContextBuilder, ToolRegistry toolRegistry, ObjectMapper objectMapper,
+            ReviewAgentStore reviewAgentStore, ReviewPlanGenerator reviewPlanGenerator,
             ReviewRunRestorer reviewRunRestorer, GitHubWorkspacePreparer workspacePreparer,
             GitHubReviewLookup reviewLookup, GitHubReviewPublisher reviewPublisher) {
         this.reviewRunMapper = reviewRunMapper;
@@ -62,6 +70,8 @@ public class ReviewHarness {
         this.reviewContextBuilder = reviewContextBuilder;
         this.toolRegistry = toolRegistry;
         this.objectMapper = objectMapper;
+        this.reviewAgentStore = reviewAgentStore;
+        this.reviewPlanGenerator = reviewPlanGenerator;
         this.reviewRunRestorer = reviewRunRestorer;
         this.workspacePreparer = workspacePreparer;
         this.reviewLookup = reviewLookup;
@@ -69,7 +79,7 @@ public class ReviewHarness {
     }
 
     /** next 是 Runtime.runLoop；正常返回必须表示已有终态或后续调度已可靠落库。 */
-    public ReviewRunResult aroundRun(Long taskId, Function<ReviewExecution, ReviewRunResult> next) {
+    public ReviewRunResult aroundRun(Long taskId, Function<ReviewExecution, AgentRunResult> next) {
         // before：任务分流；只有 RUNNING 需要工作区和执行上下文。
         ReviewRunEntity task = reviewRunMapper.selectById(taskId);
         if (task == null) {
@@ -80,7 +90,7 @@ public class ReviewHarness {
             case PUBLICATION_READY:
                 return publishAndComplete(task);
             case PUBLISHED, FAILED:
-                return new ReviewRunResult(status, null);
+                return new ReviewRunResult(status);
             case PENDING:
                 throw new IllegalStateException("审查任务尚未被认领: " + taskId);
             case RUNNING:
@@ -89,38 +99,34 @@ public class ReviewHarness {
 
         ReviewRequest request = new ReviewRequest(task.getThreadId(), task.getRepository(),
                 task.getPullRequestNumber(), task.getHeadSha(), task.getBaseSha(), null);
-        ReviewRunResult result;
+        ReviewRunEntity readyTask;
         try (ReviewWorkspace workspace = workspacePreparer.prepareWorkspace(request)) {
+            List<ReviewAgentEntity> agents = loadOrCreateAgentPlan(task, request, workspace);
 
-            ReviewExecution execution = task.getInitialMessagesJson() == null ? initializeRun(task, workspace) : reviewRunRestorer.restore(task, workspace);
-            //middle
-            result = next.apply(execution);
+            for (ReviewAgentEntity agent : agents) {
+                if (Boolean.TRUE.equals(agent.getSuccess())) {
+                    continue;
+                }
+                if (Boolean.FALSE.equals(agent.getSuccess())) {
+                    throw new IllegalStateException("RUNNING 任务包含失败 Agent: " + agent.getId());
+                }
+
+                ReviewRunEntity currentTask = reviewRunMapper.selectById(taskId);
+                if (currentTask == null || !ReviewStatus.RUNNING.name().equals(currentTask.getStatus())) {
+                    throw new IllegalStateException("任务不再允许执行 Agent: " + taskId);
+                }
+                ReviewExecution execution = reviewRunRestorer.loadExecution(currentTask, agent, workspace);
+                AgentRunResult result = next.apply(execution);
+                if (!result.success()) {
+                    reviewAgentStore.failAgentAndRun(taskId, agent.getId(), result.failureReason());
+                    return new ReviewRunResult(ReviewStatus.FAILED);
+                }
+            }
+            readyTask = aggregateAndMarkReady(task);
         } catch (IOException error) {
             throw new UncheckedIOException("工作区清理失败: " + taskId, error);
         }
-
-        // after：先可靠落库，再向消费者返回可确认的结果；执行异常直接向外抛。
-        return switch (result.status()) {
-            case PUBLICATION_READY -> publishAndComplete(reviewRunMapper.selectById(taskId));
-            case FAILED -> {
-                ReviewRunEntity update = new ReviewRunEntity();
-                update.setStatus(ReviewStatus.FAILED.name());
-                update.setFinalResultJson("{\"reason\":\"Model call budget exhausted\"}");
-                int changed = reviewRunMapper.update(update, Wrappers.<ReviewRunEntity>lambdaUpdate()
-                        .eq(ReviewRunEntity::getId, taskId)
-                        .eq(ReviewRunEntity::getStatus, ReviewStatus.RUNNING.name()));
-                if (changed != 1) {
-                    // FAILED 也可能来自推理前对数据库终态的读取。
-                    ReviewRunEntity current = reviewRunMapper.selectById(taskId);
-                    if (current == null || !ReviewStatus.FAILED.name().equals(current.getStatus())) {
-                        throw new IllegalStateException("任务失败状态未保存: " + taskId);
-                    }
-                }
-                yield result;
-            }
-            case PUBLISHED -> result;
-            default -> throw new IllegalStateException("审查循环未正常收口: " + result.status());
-        };
+        return publishAndComplete(readyTask);
     }
 
     /** 远端发布已确认且本地更新成功后，才返回 PUBLISHED。 */
@@ -146,30 +152,25 @@ public class ReviewHarness {
             if (changed != 1) {
                 throw new IllegalStateException("发布结果未保存: " + task.getId());
             }
-            return new ReviewRunResult(ReviewStatus.PUBLISHED, null);
+            return new ReviewRunResult(ReviewStatus.PUBLISHED);
         } catch (IOException error) {
             throw new UncheckedIOException("发布或核对失败: " + task.getId(), error);
         }
     }
 
-    /** next 是 modelHandler；RUNNING 结果携带模型响应，其他结果停止循环。 */
-    public ReviewRunResult aroundReasoning(ReviewExecution execution, Function<Prompt, ChatResponse> next) {
-        ReviewRunEntity task = reviewRunMapper.selectById(execution.getRunId());
+    /** next 是 modelHandler；返回一次经过预算预占和有效性校验的模型响应。 */
+    public ChatResponse aroundReasoning(ReviewExecution execution, Function<Prompt, ChatResponse> next) {
+        ReviewRunEntity task = reviewRunMapper.selectById(execution.getReviewRunId());
         if (task == null) {
-            throw new IllegalStateException("审查任务不存在: " + execution.getRunId());
+            throw new IllegalStateException("审查任务不存在: " + execution.getReviewRunId());
         }
         ReviewStatus status = ReviewStatus.valueOf(task.getStatus());
-        switch (status) {
-            case PUBLICATION_READY, PUBLISHED, FAILED:
-                return new ReviewRunResult(status, null);
-            case RUNNING:
-                break;
-            default:
-                throw new IllegalStateException("任务状态不允许推理: " + status);
+        if (status != ReviewStatus.RUNNING) {
+            throw new IllegalStateException("任务状态不允许推理: " + status);
         }
-        if(execution.getModelCalls() >= execution.getMaxModelCalls()){
-            return new ReviewRunResult(ReviewStatus.FAILED, null);
-        }
+        int modelCalls = reviewAgentStore.reserveModelCall(
+                execution.getReviewRunId(), execution.getAgentId(),
+                execution.getModelCalls(), execution.getMaxModelCalls());
         List<Message> modelMessages = reviewContextBuilder.buildModelMessages(execution);
         ToolCallingChatOptions options = ToolCallingChatOptions
                                         .builder()
@@ -178,21 +179,9 @@ public class ReviewHarness {
                                         .build();
         Prompt prompt = new Prompt(modelMessages,options);
         // 请求前预占次数，避免模型已调用但异常退出时恢复预算归零。
-        int modelCalls = execution.getModelCalls() + 1;
-        ReviewRunEntity update = new ReviewRunEntity();
-        update.setModelCalls(modelCalls);
-        int changed = reviewRunMapper.update(update, Wrappers.<ReviewRunEntity>lambdaUpdate()
-                .eq(ReviewRunEntity::getId, execution.getRunId())
-                .eq(ReviewRunEntity::getStatus, ReviewStatus.RUNNING.name())
-                .eq(ReviewRunEntity::getModelCalls, execution.getModelCalls()));
-        if (changed != 1) {
-            throw new IllegalStateException("模型调用次数未保存: " + execution.getRunId());
-        }
         execution.setModelCalls(modelCalls);
 
-        ChatResponse response = next.apply(prompt);
-        //after 预留可能的逻辑
-        return new ReviewRunResult(ReviewStatus.RUNNING, response);
+        return next.apply(prompt);
     }
 
     /** next 是实际的 chatModel.call，保持 Spring AI 的输入输出协议。 */
@@ -207,40 +196,50 @@ public class ReviewHarness {
     }
 
     /** 完整工具轮次的执行和持久化由 Coordinator 负责，异常向外传播。 */
-    public List<ToolOutcome> aroundToolRound(ReviewExecution execution,AssistantMessage assistantMessage) {
+    public ToolRoundResult aroundToolRound(ReviewExecution execution,AssistantMessage assistantMessage) {
         return toolRoundCoordinator.executeAndPersist(execution, assistantMessage);
     }
 
-    /** Workspace 由 aroundRun 管理；初始化完成落库后，才能开始模型和工具执行。 */
-    private ReviewExecution initializeRun(ReviewRunEntity task, ReviewWorkspace workspace) {
-        ReviewRequest request = new ReviewRequest(task.getThreadId(), task.getRepository(),
-                task.getPullRequestNumber(), task.getHeadSha(), task.getBaseSha(), null);
-        List<Message> initialMessages = initialMessagesBuilder.buildInitialMessages(
-                request, workspace.fileDiffs(), maxInitialDiffChars);
-        ReviewState state = new ReviewState(task.getThreadId());
-        ToolContext toolContext = new ToolContext(Map.of(ReviewToolContext.KEY,
-                new ReviewToolContext(workspace.workspaceDirectory(), state)));
-        ReviewExecution execution = new ReviewExecution(task.getId(), initialMessages, List.of(),
-                toolContext, 0, maxModelCalls, 1);
+    /** Existing rows mean recovery; only a new run is grouped and persisted here. */
+    private List<ReviewAgentEntity> loadOrCreateAgentPlan(ReviewRunEntity task, ReviewRequest request,
+            ReviewWorkspace workspace) {
+        List<ReviewAgentEntity> existing = reviewAgentStore.findByRunId(task.getId());
+        if (!existing.isEmpty()) {
+            return existing;
+        }
+        var groups = reviewPlanGenerator.generate(workspace.fileDiffs());
+        List<AgentPlan> plan = groups.stream()
+                .map(group -> new AgentPlan(
+                        initialMessagesBuilder.buildInitialMessages(request, group, maxInitialDiffChars),
+                        group.stream().map(GitHubWorkspacePreparer.FileDiff::path).toList()))
+                .toList();
+        return reviewAgentStore.createPlan(task.getId(), plan, maxModelCalls);
+    }
 
-        ReviewRunEntity update = new ReviewRunEntity();
+    private ReviewRunEntity aggregateAndMarkReady(ReviewRunEntity task) {
+        List<Finding> findings = new ArrayList<>();
+        for (ReviewAgentEntity agent : reviewAgentStore.findByRunId(task.getId())) {
+            if (!Boolean.TRUE.equals(agent.getSuccess())) {
+                throw new IllegalStateException("Agent 计划尚未全部完成: " + task.getId());
+            }
+            try {
+                findings.addAll(objectMapper.readValue(
+                        agent.getReviewStateJson(), StoredReviewState.class).findings());
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException("Agent Findings 无法解析: " + agent.getId(), error);
+            }
+        }
+        ReviewState aggregate = new ReviewState(task.getThreadId());
+        aggregate.restoreFindings(findings);
         try {
-            // 初始消息仅有 system/user 文本，使用明确的存储格式，不序列化框架内部属性。
-            update.setInitialMessagesJson(objectMapper.writeValueAsString(initialMessages.stream()
-                    .map(message -> Map.of("type", message.getMessageType().getValue(), "text", message.getText()))
-                    .toList()));
-            update.setReviewStateJson(objectMapper.writeValueAsString(
-                    new StoredReviewState(state.findingsSnapshot())));
+            String stateJson = objectMapper.writeValueAsString(
+                    new StoredReviewState(aggregate.findingsSnapshot()));
+            String payloadJson = objectMapper.writeValueAsString(
+                    Map.of("body", aggregate.buildReviewBody()));
+            return reviewAgentStore.markPublicationReady(task.getId(), stateJson, payloadJson);
         } catch (JsonProcessingException error) {
-            throw new IllegalStateException("初始化记录无法序列化: " + task.getId(), error);
+            throw new IllegalStateException("汇总结果无法序列化: " + task.getId(), error);
         }
-        update.setId(task.getId());
-        update.setModelCalls(0);
-        update.setMaxModelCalls(maxModelCalls);
-        if (reviewRunMapper.updateById(update) != 1) {
-            throw new IllegalStateException("初始化记录未保存: " + task.getId());
-        }
-        return execution;
     }
 
 }

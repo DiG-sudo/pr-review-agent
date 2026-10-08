@@ -16,12 +16,16 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentEntity;
+import com.guodi.pragent.persistence.reviewagent.ReviewAgentStore;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunEntity;
 import com.guodi.pragent.persistence.reviewrun.ReviewRunMapper;
 import com.guodi.pragent.preparation.GitHubWorkspacePreparer;
 import com.guodi.pragent.preparation.GitHubWorkspacePreparer.ReviewWorkspace;
+import com.guodi.pragent.preparation.ReviewPlanGenerator;
 import com.guodi.pragent.reviewer.GitHubReviewLookup;
 import com.guodi.pragent.reviewer.GitHubReviewPublisher;
+import com.guodi.pragent.runtime.AgentRunResult;
 import com.guodi.pragent.runtime.ReviewRunResult;
 import com.guodi.pragent.runtime.ReviewStatus;
 import com.guodi.pragent.runtime.tool.ToolRegistry;
@@ -31,10 +35,13 @@ class ReviewRunLifecycleTest {
     private final GitHubWorkspacePreparer preparer = mock(GitHubWorkspacePreparer.class);
     private final GitHubReviewLookup lookup = mock(GitHubReviewLookup.class);
     private final GitHubReviewPublisher publisher = mock(GitHubReviewPublisher.class);
+    private final ReviewAgentStore agentStore = mock(ReviewAgentStore.class);
+    private final ReviewPlanGenerator planGenerator = mock(ReviewPlanGenerator.class);
     private final ReviewRunRestorer restorer = mock(ReviewRunRestorer.class);
     private final ObjectMapper json = new ObjectMapper();
     private final ReviewHarness harness = new ReviewHarness(runs, mock(ToolRoundCoordinator.class),
             mock(ReviewContextBuilder.class), new ToolRegistry(List.of()), json,
+            agentStore, planGenerator,
             restorer, preparer, lookup, publisher);
 
     private ReviewRunEntity task(ReviewStatus status) {
@@ -49,6 +56,17 @@ class ReviewRunLifecycleTest {
         task.setStatus(status.name());
         when(runs.selectById(7L)).thenReturn(task);
         return task;
+    }
+
+    private ReviewAgentEntity unfinishedAgent() throws Exception {
+        ReviewAgentEntity agent = new ReviewAgentEntity();
+        agent.setId(9L);
+        agent.setRunId(7L);
+        agent.setAgentIndex(0);
+        agent.setReviewStateJson("{\"findings\":[]}");
+        when(agentStore.findByRunId(7L)).thenReturn(List.of(agent));
+        when(restorer.loadExecution(any(), eq(agent), any())).thenReturn(mock(com.guodi.pragent.runtime.ReviewExecution.class));
+        return agent;
     }
 
     private ReviewWorkspace workspace(Path directory) {
@@ -82,20 +100,25 @@ class ReviewRunLifecycleTest {
         ReviewRunEntity task = task(ReviewStatus.RUNNING);
         ReviewWorkspace workspace = workspace(directory);
         when(lookup.findPublished(any(), anyInt(), any(), any())).thenReturn(OptionalLong.empty());
-        task.setPublicationPayloadJson(json.writeValueAsString(Map.of("body", "saved body")));
-        when(publisher.publish("owner/repo", 1, task.getHeadSha(), "run-7", "saved body")).thenReturn(42L);
+        task.setPublicationPayloadJson(json.writeValueAsString(Map.of("body", "No issues found.")));
+        when(publisher.publish("owner/repo", 1, task.getHeadSha(), "run-7", "No issues found.")).thenReturn(42L);
         when(runs.update(any(ReviewRunEntity.class), any())).thenReturn(1);
+        ReviewAgentEntity agent = unfinishedAgent();
+        when(agentStore.markPublicationReady(eq(7L), anyString(), anyString())).thenAnswer(call -> {
+            task.setStatus("PUBLICATION_READY");
+            task.setPublicationPayloadJson(call.getArgument(2));
+            return task;
+        });
 
         var result = harness.aroundRun(7L, execution -> {
-            assertThat(execution.getHistory()).isEmpty();
-            task.setStatus("PUBLICATION_READY");
-            return new ReviewRunResult(ReviewStatus.PUBLICATION_READY, null);
+            agent.setSuccess(true);
+            return AgentRunResult.succeeded();
         });
 
         assertThat(result.status()).isEqualTo(ReviewStatus.PUBLISHED);
         verify(workspace).close();
         var order = inOrder(publisher, runs);
-        order.verify(publisher).publish("owner/repo", 1, task.getHeadSha(), "run-7", "saved body");
+        order.verify(publisher).publish("owner/repo", 1, task.getHeadSha(), "run-7", "No issues found.");
         order.verify(runs).update(any(ReviewRunEntity.class), any());
     }
 
@@ -103,13 +126,11 @@ class ReviewRunLifecycleTest {
     void budgetFailureIsPersistedAndWorkspaceClosed(@TempDir Path directory) throws Exception {
         task(ReviewStatus.RUNNING);
         ReviewWorkspace workspace = workspace(directory);
-        when(runs.update(any(ReviewRunEntity.class), any())).thenReturn(1);
-        var result = harness.aroundRun(7L, execution -> new ReviewRunResult(ReviewStatus.FAILED, null));
+        ReviewAgentEntity agent = unfinishedAgent();
+        var result = harness.aroundRun(7L,
+                execution -> AgentRunResult.failed("Model call budget exhausted"));
         assertThat(result.status()).isEqualTo(ReviewStatus.FAILED);
-        ArgumentCaptor<ReviewRunEntity> saved = ArgumentCaptor.forClass(ReviewRunEntity.class);
-        verify(runs).update(saved.capture(), any());
-        assertThat(saved.getValue().getStatus()).isEqualTo("FAILED");
-        assertThat(saved.getValue().getFinalResultJson()).contains("budget exhausted");
+        verify(agentStore).failAgentAndRun(7L, agent.getId(), "Model call budget exhausted");
         verify(workspace).close();
         verifyNoInteractions(lookup, publisher);
     }
@@ -118,6 +139,7 @@ class ReviewRunLifecycleTest {
     void executionExceptionPropagatesAndWorkspaceCloses(@TempDir Path directory) throws Exception {
         task(ReviewStatus.RUNNING);
         ReviewWorkspace workspace = workspace(directory);
+        unfinishedAgent();
         assertThatThrownBy(() -> harness.aroundRun(7L, execution -> {
             throw new IllegalStateException("model unavailable");
         })).hasMessage("model unavailable");

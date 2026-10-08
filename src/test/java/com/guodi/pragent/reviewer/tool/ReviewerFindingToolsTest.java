@@ -19,7 +19,7 @@ class ReviewerFindingToolsTest {
     @Test
     void publicationCallbackPreservesExactPlainText(@TempDir Path fixture) {
         ReviewState state = new ReviewState("plain-text");
-        ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(fixture, state)));
+        ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY, new ReviewToolContext(fixture, state, "")));
         var callback = ToolCallbacks.from(new ReviewTerminalTools())[0];
         assertThat(callback.call("{}", context)).isEqualTo("No issues found.");
         state.addFinding("high", "correctness", "Example.java", 1, "First line \"quoted\"\nSecond line \\ literal", null);
@@ -37,7 +37,7 @@ class ReviewerFindingToolsTest {
         Files.createSymbolicLink(source.resolve("external-dir"), outside);
         Files.createSymbolicLink(source.resolve("internal.java"), source.resolve("Example.java"));
         ToolContext context = new ToolContext(Map.of(ReviewToolContext.KEY,
-                new ReviewToolContext(fixture, new ReviewState("links"))));
+                new ReviewToolContext(fixture, new ReviewState("links"), "")));
         assertThat(new ReviewReadTools().searchCode("needle", null, 10, context))
                 .isEqualTo("Example.java:1: needle normal source");
     }

@@ -14,13 +14,14 @@ import org.springframework.stereotype.Component;
 
 import com.guodi.pragent.harness.ReviewHarness;
 import com.guodi.pragent.runtime.tool.ToolOutcome;
+import com.guodi.pragent.runtime.tool.ToolRoundResult;
 
 /** 外部执行入口和核心 ReAct 循环；构造时装配 Harness 插入点。 */
 @Component
 public class ReviewReActRuntime {
 
     private final Function<Prompt, ChatResponse> modelHandler;
-    private final Function<ReviewExecution, ReviewRunResult> reasonHandler;
+    private final Function<ReviewExecution, ChatResponse> reasonHandler;
     private final Function<Long, ReviewRunResult> runHandler;
     private final ReviewHarness reviewHarness;
     public ReviewReActRuntime(ReviewHarness reviewHarness, ChatModel chatModel) {
@@ -40,37 +41,37 @@ public class ReviewReActRuntime {
         return prompt -> reviewHarness.aroundModelCall(prompt, chatModel::call);
     }
 
-    private Function<ReviewExecution, ReviewRunResult> wrapReasonCall(ReviewHarness reviewHarness, Function<Prompt, ChatResponse> next) {
+    private Function<ReviewExecution, ChatResponse> wrapReasonCall(ReviewHarness reviewHarness, Function<Prompt, ChatResponse> next) {
         return execution -> reviewHarness.aroundReasoning(execution, next);
     }
 
-    private Function<Long, ReviewRunResult> wrapRunCall(ReviewHarness reviewHarness, Function<ReviewExecution, ReviewRunResult> next) {
+    private Function<Long, ReviewRunResult> wrapRunCall(ReviewHarness reviewHarness, Function<ReviewExecution, AgentRunResult> next) {
         return taskId -> reviewHarness.aroundRun(taskId, next);
     }
 
+    private AgentRunResult runLoop(ReviewExecution execution) {
+        try {
+            while (true) {
+                ChatResponse response = reasonHandler.apply(execution);
+                AssistantMessage assistantMessage = response.getResult().getOutput();
+                if (!assistantMessage.hasToolCalls()) {
+                    execution.getHistory().add(assistantMessage);
+                    execution.getHistory().add(new UserMessage("请继续审查；完成后单独调用 publish_review。"));
+                    continue;
+                }
 
-    private ReviewRunResult runLoop(ReviewExecution execution) {
-        while (true) {
-            ReviewRunResult result = reasonHandler.apply(execution);
-            if (result.status() != ReviewStatus.RUNNING) {
-                return result;
-            }
-            AssistantMessage assistantMessage = result.response().getResult().getOutput();
-            //由于ReviewStatus.RUNNING,response1.无工具调用,2.有工具调用不包含publish,3.有工具调用包含publish
-            if(!assistantMessage.hasToolCalls()){
-                //继续循环并且添加消息
+                ToolRoundResult round = reviewHarness.aroundToolRound(execution, assistantMessage);
+                List<ToolOutcome> outcomes = round.outcomes();
                 execution.getHistory().add(assistantMessage);
-                execution.getHistory().add(new UserMessage("请继续审查；完成后单独调用 publish_review。"));
-                continue;
+                execution.getHistory().add(ToolResponseMessage.builder()
+                        .responses(outcomes.stream().map(ToolOutcome::getToolResponse).toList()).build());
+
+                if (round.completed()) {
+                    return AgentRunResult.succeeded();
+                }
             }
-            //此时包含工具调用,交给aroundTool处理
-            List<ToolOutcome> outcomes = reviewHarness.aroundToolRound(execution, assistantMessage);
-            
-            execution.getHistory().add(assistantMessage);
-            execution.getHistory().add(ToolResponseMessage.builder()
-                    .responses(outcomes.stream().map(ToolOutcome::getToolResponse).toList()).build());
+        } catch (AgentRunFailedException failed) {
+            return AgentRunResult.failed(failed.getMessage());
         }
     }
-
-
 }

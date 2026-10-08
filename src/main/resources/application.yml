@@ -25,6 +25,10 @@ spring:
       port: ${PR_REVIEW_REDIS_PORT:6379}
 
 pr-review:
+  planning:
+    grouping-threshold: ${PR_REVIEW_GROUPING_THRESHOLD:4}
+    max-agents: ${PR_REVIEW_MAX_AGENTS:4}
+    max-diff-chars: ${PR_REVIEW_MAX_PLANNING_DIFF_CHARS:30000}
   context:
     max-initial-diff-chars: ${PR_REVIEW_MAX_INITIAL_DIFF_CHARS:30000}
   execution:

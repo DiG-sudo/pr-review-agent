@@ -122,6 +122,31 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(complete)
         self.assertIn('| NOT RUN |', rows[0])
 
+    def test_duplicate_junit_cases_are_rejected(self):
+        self.xml()
+        (self.source/'TEST-D.xml').write_text('<testsuite><testcase classname="C" name="test"/></testsuite>')
+        _, errors = runner.collect_results(self.source, self.dest, 0)
+        self.assertTrue(any('Duplicate testcase' in error for error in errors))
+
+    def test_green_agent_xml_requires_current_offline_model_attestation(self):
+        import json
+        for proof, expected in ((None, 1), ({'realLlmRequests': 1, 'realChatModelBeans': 0}, 1),
+                                ({'realLlmRequests': 0, 'realChatModelBeans': 1}, 1),
+                                ({'realLlmRequests': 0, 'realChatModelBeans': 0}, 0)):
+            with self.subTest(proof=proof), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory); (root/'scripts').mkdir()
+                (root/'scripts/agent_e2e_requirements.json').write_text('[{"id":"T","tests":["test"],"assertions":"x"}]')
+                def fake(command, cwd, output, timeout=600):
+                    output.write_text('fake')
+                    if command[0] == 'mvn':
+                        target = root/'target/surefire-reports'; target.mkdir(exist_ok=True)
+                        (target/'TEST-C.xml').write_text('<testsuite><testcase classname="C" name="test"/></testsuite>')
+                        if proof is not None:
+                            (root/'target/e2e-logs/offline-model.json').write_text(json.dumps(proof))
+                    return 0
+                with patch.object(runner, 'ROOT', root), patch.object(runner, 'run_command', fake):
+                    self.assertEqual(runner.main(['--phase','agent']), expected)
+
 
 if __name__ == '__main__':
     unittest.main()

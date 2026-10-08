@@ -26,14 +26,7 @@ public class ReviewRunEntity {
     /** PENDING、RUNNING、PUBLICATION_READY、PUBLISHED、FAILED。 */
     private String status;
 
-    /** 已预占的模型调用次数；发起请求前持久化，失败请求也计入预算。 */
-    private Integer modelCalls;
-
-    /** 初始化时固定的任务预算，恢复时不重新读取配置。 */
-    private Integer maxModelCalls;
-
-    private String initialMessagesJson;
-
+    /** Final aggregate Finding snapshot after every Agent succeeds. */
     private String reviewStateJson;
 
     private String finalResultJson;

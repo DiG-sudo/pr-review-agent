@@ -17,7 +17,8 @@ import lombok.Setter;
 @Getter
 public final class ReviewExecution {
 
-    private final Long runId;
+    private final Long reviewRunId;
+    private final Long agentId;
     private final List<Message> initialMessages;
     /** 完整历史可追加；上下文裁剪只操作发送给模型的副本。 */
     private final List<Message> history;
@@ -33,8 +34,11 @@ public final class ReviewExecution {
         return ReviewToolContext.from(toolContext).reviewState();
     }
 
-    public ReviewExecution(Long runId, List<Message> initialMessages, List<Message> history, ToolContext toolContext, int modelCalls, int maxModelCalls, int nextToolRoundNumber) {
-        this.runId = Objects.requireNonNull(runId, "runId");
+    public ReviewExecution(Long reviewRunId, Long agentId, List<Message> initialMessages,
+            List<Message> history, ToolContext toolContext, int modelCalls,
+            int maxModelCalls, int nextToolRoundNumber) {
+        this.reviewRunId = Objects.requireNonNull(reviewRunId, "reviewRunId");
+        this.agentId = Objects.requireNonNull(agentId, "agentId");
         this.initialMessages = List.copyOf(initialMessages);
         this.history = new ArrayList<>(history);
         this.toolContext = Objects.requireNonNull(toolContext, "toolContext");
