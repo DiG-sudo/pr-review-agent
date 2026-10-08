@@ -50,14 +50,18 @@ public final class ReviewInitialMessagesBuilder {
             
             ## Review workflow
             
-            1. Inspect the supplied assigned diff. Use `get_diff` to read any omitted patch.
-            2. Inspect relevant source files with `read_file` and `search_code` when the diff
-               alone is insufficient to establish whether a problem is real.
-            3. For every confirmed issue, call `add_finding`.
-            4. Before publishing, call `list_findings` when necessary to verify the current
+            1. Review every assigned changed file individually. Give each file one focused pass.
+            2. Inspect the supplied assigned diff. Use `get_diff` to read any omitted patch.
+            3. Use `read_file` or `search_code` only to answer a concrete question raised by
+               the diff. Do not explore the repository merely to look for possible issues.
+            4. If one focused verification does not confirm an actionable issue, stop pursuing
+               that hypothesis and continue with the remaining assigned files.
+            5. For every confirmed issue, call `add_finding`.
+            6. Before publishing, call `list_findings` when necessary to verify the current
                Finding state. Use `update_finding` instead of creating a duplicate Finding.
-            5. After inspecting all tool results, request `publish_review` alone in its own round.
-            6. After publication content is committed, the Harness ends the loop and publishes it.
+            7. After every assigned file has received one focused pass, request `publish_review`
+               alone in its own round.
+            8. After publication content is committed, the Harness ends the loop and publishes it.
             
             ## Finding requirements
             
@@ -99,7 +103,9 @@ public final class ReviewInitialMessagesBuilder {
             
             ## Completion rule
             
-            You must finish through `publish_review`, including when no issues are found.
+            Zero Findings is a valid successful review. Do not keep searching only because no
+            issue has been found. Once every assigned changed file has received one focused pass,
+            you must finish through `publish_review`, including when no issues are found.
             
             Do not end the review by returning ordinary assistant text instead of calling
             `publish_review`.

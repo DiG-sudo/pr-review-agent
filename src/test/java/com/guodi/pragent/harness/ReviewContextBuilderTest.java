@@ -25,7 +25,7 @@ class ReviewContextBuilderTest {
 
     @Test
     void buildsTheSameContextShapeFromCommittedHistoryAndFindings(@TempDir Path workspace) {
-        ReviewContextBuilder context = new ReviewContextBuilder(new ObjectMapper(), 10, 5);
+        ReviewContextBuilder context = new ReviewContextBuilder(new ObjectMapper());
         List<Message> initial = List.of(new SystemMessage("pull request reviewer"),
                 new UserMessage("owner/repo at abc123"));
         AssistantMessage call = AssistantMessage.builder()
@@ -47,14 +47,17 @@ class ReviewContextBuilderTest {
                 List.of(call, result), tools, 1, 10, 2);
         List<Message> messages = context.buildModelMessages(execution);
 
-        assertThat(messages).hasSize(5);
+        assertThat(messages).hasSize(6);
         assertThat(messages.get(0).getText()).contains("pull request reviewer");
         assertThat(messages.get(1).getText()).contains("owner/repo", "abc123");
         assertThat(((AssistantMessage) messages.get(2)).getToolCalls().getFirst().id())
                 .isEqualTo("call-1");
         assertThat(((ToolResponseMessage) messages.get(3)).getResponses().getFirst().responseData())
-                .contains("tool result truncated");
+                .isEqualTo("long source result");
         assertThat(messages.get(4).getText()).contains("finding-1", "Wrong value");
+        assertThat(messages.get(5).getText())
+                .contains("current model call: 1 of 10", "calls remaining after this response: 9",
+                        "Zero Findings is a valid successful review");
         assertThat(result.getResponses().getFirst().responseData())
                 .isEqualTo("long source result");
     }

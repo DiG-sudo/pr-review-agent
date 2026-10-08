@@ -13,7 +13,7 @@ public final class ReviewTerminalTools {
 
     @Tool(
             name = "publish_review",
-            description = "Finish the current review scope. Request this tool alone; the Harness aggregates scopes and handles remote publication.",
+            description = "Finish the current review scope. Call this tool alone after every assigned file has received one focused review pass, including when no issues were found. Zero findings is a valid successful result; the Harness aggregates scopes and handles remote publication.",
             resultConverter = PlainTextResultConverter.class)
     public String publishReview(ToolContext toolContext) {
         return ReviewToolContext.from(toolContext).reviewState().buildReviewBody();

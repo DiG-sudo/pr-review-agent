@@ -21,6 +21,10 @@ class ReviewInitialMessagesBuilderTest {
                 "head-sha", "base-sha", null);
         ReviewInitialMessagesBuilder prompt = new ReviewInitialMessagesBuilder();
 
+        assertThat(prompt.buildInitialMessages(request, files, 10_000).getFirst().getText())
+                .contains("Review every assigned changed file individually",
+                        "Do not explore the repository merely to look for possible issues",
+                        "Zero Findings is a valid successful review");
         String full = prompt.buildInitialMessages(request, files, 10_000).get(1).getText();
         assertThat(full).contains("owner/repo", "base-sha", "head-sha",
                 "### A.java", "-before", "+after", "### B.java", "-old", "+new");

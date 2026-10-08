@@ -33,7 +33,7 @@ class ReviewModelBudgetTest {
     private final ReviewRunMapper runs = mock(ReviewRunMapper.class);
     private final ReviewAgentStore agentStore = mock(ReviewAgentStore.class);
     private final ReviewHarness harness = new ReviewHarness(runs, mock(ToolRoundCoordinator.class),
-            new ReviewContextBuilder(new ObjectMapper(), 10, 12000), new ToolRegistry(List.of()),
+            new ReviewContextBuilder(new ObjectMapper()), new ToolRegistry(List.of()),
             new ObjectMapper(), agentStore, mock(ReviewPlanGenerator.class),
             mock(ReviewRunRestorer.class), mock(GitHubWorkspacePreparer.class),
             mock(GitHubReviewLookup.class), mock(GitHubReviewPublisher.class));

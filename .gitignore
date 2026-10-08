@@ -8,3 +8,11 @@ target/
 *.excalidraw
 docs/
 references/
+
+
+# Keep the three current project documents under version control.
+!README.md
+!docs/
+docs/*
+!docs/ARCHITECTURE.md
+!docs/ISSUES.md
